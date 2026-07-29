@@ -224,14 +224,21 @@ def process_swing_pdf(pdf_path: str, external_session: Session = None) -> bool:
                         if "I.R.R.F." in line_text:
                             val_irrf = cleanup_dict['precoOperacao'](clean_value_text)
                             total_irrf += val_irrf
-                            if line_text.strip().endswith(" D"):
+                            has_d = line_text.strip().endswith(" D")
+                            if has_d:
                                 total_irrf_deduzido += val_irrf
+                            logging.debug(f"  [TAXA/{key_area}] IRRF -> val={val_irrf} | has_D={has_d} | irrf_deduzido={total_irrf_deduzido} | linha='{line_text}'")
                             # IRRF não deve ser somado como taxa operacional, pois é antecipação de imposto
                         elif "Líquido para" in line_text:
                             val_liq = cleanup_dict['precoOperacao'](clean_value_text)
                             liquido_real_val = -abs(val_liq) if line_text.strip().endswith(" D") else abs(val_liq)
+                            logging.debug(f"  [TAXA/{key_area}] LiquidoReal -> val={liquido_real_val} | linha='{line_text}'")
                         elif line_text.strip().endswith(" D") and not line_text.startswith("Total") and not line_text.startswith("Líquido") and not line_text.startswith("Valor líquido") and not line_text.startswith("Soma"):
-                            total_taxas += cleanup_dict['precoOperacao'](clean_value_text)
+                            added = cleanup_dict['precoOperacao'](clean_value_text)
+                            total_taxas += added
+                            logging.debug(f"  [TAXA/{key_area}] TAXA +{added} -> total_taxas={total_taxas} | linha='{line_text}'")
+                        else:
+                            logging.debug(f"  [TAXA/{key_area}] SKIP -> linha='{line_text}'")
 
                 # Leitura e verificação do Resumo dos Negócios (Compras vs Vendas)
                 vendas_vista = Decimal('0.00')
