@@ -139,6 +139,10 @@ O script vai pedir: **usuário**, **senha**, **host**, **porta** e **nome do ban
 
 Coloque os PDFs das notas de corretagem na pasta `notas/` e execute o pipeline de extração correspondente ao tipo de operação.
 
+> **💡 Mapeamento de Ativos (Swing Trade):** 
+> Em notas de Swing Trade, algumas corretoras descrevem apenas o nome da empresa (ex: `PRIO ON NM`) sem o código da ação (`PRIO3`). O extrator possui heurísticas (ex: se a nota disser `FII BTLG BTLG11`, ele detecta `BTLG11`), mas quando não consegue identificar o ativo de forma segura, a extração é pausada e um arquivo chamado `missing_assets.yaml` é gerado.
+> Quando isso acontecer, basta abrir este arquivo, preencher o ticker correto do ativo que faltou, e rodar a extração novamente para o sistema registrar na base de dados!
+
 ### 6. Interface visual
 
 ```bash
