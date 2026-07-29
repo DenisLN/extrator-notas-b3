@@ -1,0 +1,26 @@
+# Ambiente Virtual / Python
+__pycache__/
+*.pyc
+.env
+venv/
+env/
+
+# Configurações do Banco
+db_connection.py
+frontend/db_connection.py
+
+# Arquivos sensíveis
+*.pdf
+
+# Pasta scripts, exceto testAreas.py e setup_env.py
+scripts/*
+!scripts/testAreas.py
+!scripts/setup_env.py
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# Pastas geradas localmente / temporárias
+graphify-out/
+backups/
+planilhas-exemplo/

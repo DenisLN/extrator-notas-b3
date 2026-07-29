@@ -1,0 +1,10 @@
+PyMuPDF
+pdfplumber
+xxhash
+sqlmodel
+psycopg2-binary
+sqlalchemy
+PyYAML
+pandas
+streamlit
+openpyxl
