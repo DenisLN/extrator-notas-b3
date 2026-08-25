@@ -43,12 +43,14 @@ areaDict_xp_swing = {
      'tableClearing': Rect(299, 456, 565, 489),
      'tableBolsa': Rect(299, 497, 565, 538),
      'tableCustos': Rect(299, 538, 565, 633),
+     'irrf_day': Rect(31, 581, 135, 593),
      'columns': {
          'operacaoTipo': 'C/V',
          'nomeAtivo': 'Especificação do título',
          'quantidade': 'Quantidade',
          'precoAjuste': 'Preço / Ajuste',
          'precoOperacao': 'Valor Operação / Ajuste',
+         'obs': 'Obs. (*)',
      },
      'headers': ['Q', 'Negociação', 'C/V', 'Tipo mercado', 'Prazo', 'Especificação do título', 'Obs. (*)', 'Quantidade', 'Preço / Ajuste', 'Valor Operação / Ajuste', 'D/C'],
 }
@@ -65,12 +67,14 @@ areaDict_btg_swing = {
      'tableClearing': Rect(298, 515, 567, 551),
      'tableBolsa': Rect(297, 561, 566, 622),
      'tableCustos': Rect(297, 633, 567, 716),
+     'irrf_day': Rect(31, 581, 135, 593), # NAO VERIFICADO
      'columns': {
          'operacaoTipo': 'C/V',
          'nomeAtivo': 'Especificação do título',
          'quantidade': 'Quantidade',
          'precoAjuste': 'Preço / Ajuste',
          'precoOperacao': 'Valor Operação / Ajuste',
+         'obs': 'Obs. (*)',
      },
      'headers': ['Q', 'Negociação', 'C/V', 'Tipo mercado', 'Prazo', 'Especificação do título', 'Obs. (*)', 'Quantidade', 'Preço / Ajuste', 'Valor Operação / Ajuste', 'D/C'],
 }

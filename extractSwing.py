@@ -2,6 +2,7 @@ from collections import defaultdict
 from datetime import date
 from decimal import Decimal
 import logging
+import math
 import fitz as pymu
 import pdfplumber as pdfpu
 import xxhash
@@ -11,8 +12,29 @@ from db_connection import engine, get_session
 from sqlalchemy.exc import IntegrityError
 from schemas import operacoesSwingtrade, registroNotasSwing
 from cleanupFunctions import cleanup_dict
-from assetMapper import resolve_asset_names
-from areaCodes import * 
+from assetMapper import resolve_asset_names_with_type
+from areaCodes import *
+
+
+def calcular_irrf_por_tipo(vendas_por_tipo: dict[str, Decimal]) -> dict[str, Decimal]:
+    """
+    Calcula o IRRF de swing trade por categoria de ativo.
+    A fórmula usa TRUNCAMENTO (floor), não arredondamento.
+    Verificado matematicamente em múltiplas notas reais (BTG e XP).
+
+    Exemplo verificado (nota BTG):
+      Ações: R$ 1.015,21 -> floor(1015.21 * 0.00005 * 100) / 100 = 0.05
+      FIIs:  R$ 693,56  -> floor(693.56  * 0.00005 * 100) / 100 = 0.03
+      BDRs:  R$ 713,65  -> floor(713.65  * 0.00005 * 100) / 100 = 0.03
+      Total calculada = 0.11  <- bate exatamente com a nota
+    """
+    TAXA = Decimal('0.00005')
+    resultado: dict[str, Decimal] = {}
+    for tipo, total_vendas in vendas_por_tipo.items():
+        irrf_bruto = total_vendas * TAXA
+        irrf_truncado = Decimal(math.floor(irrf_bruto * 100)) / 100
+        resultado[tipo] = irrf_truncado
+    return resultado
 
 logging.getLogger().setLevel(logging.DEBUG)
 logging.getLogger("pdfminer").setLevel(logging.WARNING)
@@ -126,7 +148,7 @@ def process_swing_pdf(pdf_path: str, external_session: Session = None) -> bool:
 
             if table:
                 for row in table: 
-                    # Se for linha de cabeçalho, usamos a nova lógica elegante do usuário
+                    # Se for linha de cabeçalho
                     if 'Quantidade' in row or 'C/V' in row or 'Negociação' in row:
                         for key, expected_header in coordmap['columns'].items():
                             exp_norm = re.sub(r'\s+', '', expected_header.upper())
@@ -147,13 +169,16 @@ def process_swing_pdf(pdf_path: str, external_session: Session = None) -> bool:
                     if any(k not in dynamic_cols for k in required_keys):
                         # Fallback seguro baseado nas imagens, para caso a primeira página cortou o cabeçalho
                         logging.warning(f"Usando fallback de colunas pois faltam chaves: {dynamic_cols}")
-                        dynamic_cols = {'operacaoTipo': 2, 'nomeAtivo': 5, 'quantidade': 7, 'precoAjuste': 8, 'precoOperacao': 9}
+                        dynamic_cols = {'operacaoTipo': 2, 'nomeAtivo': 5, 'quantidade': 7, 'precoAjuste': 8, 'precoOperacao': 9, 'obs': 6}
 
                     try:
                         op_tipo = cleanup_dict['operacaoTipo'](row[dynamic_cols['operacaoTipo']])
                         nome_ativo = cleanup_dict['nomeAtivo'](row[dynamic_cols['nomeAtivo']])
                         qnt = cleanup_dict['quantidade'](row[dynamic_cols['quantidade']])
                         preco_op = cleanup_dict['precoOperacao'](row[dynamic_cols['precoOperacao']])
+                        obs_val = row[dynamic_cols['obs']] if 'obs' in dynamic_cols else (row[6] if len(row) > 6 else '')
+                        # 'D' = Day Trade
+                        is_day = 'D' in str(obs_val or '')
                     except IndexError as e:
                         logging.warning(f"Erro ao acessar colunas na linha {row}: {e}")
                         continue
@@ -164,9 +189,9 @@ def process_swing_pdf(pdf_path: str, external_session: Session = None) -> bool:
                         continue
                         
                     logging.debug(f"Página {page_idx}: Linha lida -> row={row}")
-                    logging.debug(f"Página {page_idx}: Dados parseados -> op_tipo={op_tipo}, ativo={nome_ativo}, qnt={qnt}, preco={preco_op}")
+                    logging.debug(f"Página {page_idx}: Dados parseados -> op_tipo={op_tipo}, ativo={nome_ativo}, qnt={qnt}, preco={preco_op}, is_day={is_day}")
 
-                    key = (nr_nota, nome_ativo, op_tipo)
+                    key = (nr_nota, nome_ativo, op_tipo, is_day)
                     if key not in aggregated_trades:
                         aggregated_trades[key] = {
                             'data': data_val,
@@ -179,10 +204,12 @@ def process_swing_pdf(pdf_path: str, external_session: Session = None) -> bool:
                             'corretora': broker,
                             'nrNota': nr_nota,
                             'hashArquivo': file_hash,
+                            'isDayTrade': is_day,
                         }
 
                     aggregated_trades[key]['quantidade'] += qnt
                     aggregated_trades[key]['totalValor'] += preco_op
+                        
                     ativos_negociados[nome_ativo] = op_tipo
 
             # Extração dos resumos na última página da nota (quando NÃO contiver 'CONTINUA...' nas áreas de resumo)
@@ -228,7 +255,6 @@ def process_swing_pdf(pdf_path: str, external_session: Session = None) -> bool:
                             if has_d:
                                 total_irrf_deduzido += val_irrf
                             logging.debug(f"  [TAXA/{key_area}] IRRF -> val={val_irrf} | has_D={has_d} | irrf_deduzido={total_irrf_deduzido} | linha='{line_text}'")
-                            # IRRF não deve ser somado como taxa operacional, pois é antecipação de imposto
                         elif "Líquido para" in line_text:
                             val_liq = cleanup_dict['precoOperacao'](clean_value_text)
                             liquido_real_val = -abs(val_liq) if line_text.strip().endswith(" D") else abs(val_liq)
@@ -265,7 +291,6 @@ def process_swing_pdf(pdf_path: str, external_session: Session = None) -> bool:
                         elif "Compras à vista" in line_text:
                             compras_vista = cleanup_dict['precoOperacao'](clean_value_text)
 
-                # O liquido da nota pode descontar o IRRF caso ele tenha a letra D, mas para fins de L/P ele não é uma taxa
                 liquido_conferido = vendas_vista - compras_vista - total_taxas - total_irrf_deduzido
                 
                 logging.debug(f"Página {page_idx}: Resumo Extraído -> vendas_vista={vendas_vista}, compras_vista={compras_vista}, total_taxas={total_taxas}, liquido_calc={liquido_conferido}, liquido_real={liquido_real_val}, total_irrf={total_irrf}")
@@ -274,6 +299,17 @@ def process_swing_pdf(pdf_path: str, external_session: Session = None) -> bool:
                 summary_data['irrf'] = total_irrf
                 summary_data['liquidoReal'] = liquido_real_val
                 summary_data['liquidoCalc'] = liquido_conferido
+                
+                # Extração do irrfDay
+                summary_data['irrfDay'] = None
+                rect_irrf_day = coordmap.get('irrf_day')
+                if rect_irrf_day:
+                    txt_irrf_day = page_pymu.get_textbox(rect_irrf_day)
+                    if txt_irrf_day:
+                        val_irrf_day = cleanup_dict['irrfDay'](txt_irrf_day)
+                        if val_irrf_day > 0:
+                            summary_data['irrfDay'] = val_irrf_day
+                            logging.debug(f"  [irrf_day] IRRF Day Trade Encontrado: {val_irrf_day}")
 
                 if total_taxas == Decimal('0.00'):
                     logging.warning(f"⚠️ Nota sem custo detectada (taxas=0). Abortando processamento. {pdf_path}")
@@ -285,13 +321,50 @@ def process_swing_pdf(pdf_path: str, external_session: Session = None) -> bool:
                 if has_venda and total_irrf == Decimal('0.00'):
                     logging.info(f"ℹ️ Nota com venda e sem IRRF debitado na nota. {pdf_path}")
 
+    # --- INÍCIO DO LOCK ---
+    if summary_data['taxas'] == Decimal('0.00') and summary_data['liquidoReal'] == Decimal('0.00') and summary_data['liquidoCalc'] == Decimal('0.00'):
+        logging.error(f"🚨 ERRO CRÍTICO: Nota com valores de resumo todos zerados. Abortando! {pdf_path}")
+        with open("notas_com_erro_resumo.txt", "a", encoding="utf-8") as f_out:
+            f_out.write(f"{pdf_path}\n")
+        return False
+    # --- FIM DO LOCK ---
+
     def execute_persistence(session: Session) -> bool:
         unique_assets = list(ativos_negociados.keys())
-        mapped_names = resolve_asset_names(session, unique_assets)
+        mapped_names = resolve_asset_names_with_type(session, unique_assets)
 
         if mapped_names is None:
             logging.error("Execução pausada. Preencha o arquivo 'missing_assets.yaml' com os tickers correspondentes e execute novamente.")
             return False
+
+        # Acumular vendas por tipo de ativo para cálculo de IRRF breakdown
+        vendas_por_tipo: dict[str, Decimal] = defaultdict(Decimal)
+        for trade in aggregated_trades.values():
+            if trade['operacaoTipo'] == 'V' and not trade.get('isDayTrade', False):
+                tipo = mapped_names.get(trade['nomeAtivo'], {}).get('tipoAtivo', 'ACAO')
+                vendas_por_tipo[tipo] += trade['totalValor']
+
+        irrf_por_tipo = calcular_irrf_por_tipo(vendas_por_tipo)
+
+        # --- FAILSAFE: verificar se o IRRF calculated bate com o reportado na nota ---
+        irrf_calculado = sum(irrf_por_tipo.values())
+        irrf_reportado = summary_data['irrf']
+
+        TOLERANCIA = Decimal('0.01')
+
+        if irrf_reportado > Decimal('0.00') and abs(irrf_calculado - irrf_reportado) > TOLERANCIA:
+            logging.error(
+                f"🚨 FAILSAFE IRRF: IRRF calculado ({irrf_calculado}) difere do reportado na nota ({irrf_reportado}). "
+                f"Diferença: {abs(irrf_calculado - irrf_reportado)}. Abortando nota {last_header.get('nrNota')}. "
+                f"Arquivo: {pdf_path}"
+            )
+            with open("notas_irrf_divergente.txt", "a", encoding="utf-8") as f_out:
+                f_out.write(
+                    f"{pdf_path} | nota={last_header.get('nrNota')} | "
+                    f"calculado={irrf_calculado} | reportado={irrf_reportado}\n"
+                )
+            return False
+        # --- FIM DO FAILSAFE ---
 
         rel_path = str(pdf_path).replace("z:\\", "").replace("Z:\\", "").replace("z:/", "").replace("Z:/", "").replace("/mnt/", "")
         rel_path = rel_path.replace("Projetos\\notascorretagem\\", "").replace("Projetos/notascorretagem/", "")
@@ -305,9 +378,15 @@ def process_swing_pdf(pdf_path: str, external_session: Session = None) -> bool:
             hashNota=file_hash,
             taxas=summary_data['taxas'],
             irrf=summary_data['irrf'],
+            irrfTotal=sum(irrf_por_tipo.values()) if irrf_por_tipo else summary_data['irrf'],
+            irrfAcao=irrf_por_tipo.get("ACAO"),
+            irrfFii=irrf_por_tipo.get("FII"),
+            irrfEtf=irrf_por_tipo.get("ETF"),
+            irrfBdr=irrf_por_tipo.get("BDR"),
+            irrfDay=summary_data.get('irrfDay'),
             liquidoCalc=summary_data['liquidoCalc'],
             liquidoReal=summary_data['liquidoReal'],
-            ativosNegociados={mapped_names.get(k, k): v for k, v in ativos_negociados.items()},
+            ativosNegociados={mapped_names.get(k, {}).get('nomeFantasia', k): v for k, v in ativos_negociados.items()},
             relativePath=rel_path,
         )
         try:
@@ -321,11 +400,18 @@ def process_swing_pdf(pdf_path: str, external_session: Session = None) -> bool:
             session.rollback()
             logging.error(f"Erro ao salvar nota em registroNotasSwing: {e}")
 
+        vol_total_nota = sum(t['totalValor'] for t in aggregated_trades.values())
+
         for key, trade in aggregated_trades.items():
             qnt = trade['quantidade']
             total_val = trade['totalValor']
             preco_ajuste = Decimal(round(total_val / qnt, 2)) if qnt > 0 else Decimal('0.00')
-            nome_fantasia = mapped_names.get(trade['nomeAtivo'], trade['nomeAtivo'])
+            nome_fantasia = mapped_names.get(trade['nomeAtivo'], {}).get('nomeFantasia', trade['nomeAtivo'])
+
+            if vol_total_nota > Decimal('0'):
+                taxa_rateada = (trade['totalValor'] / vol_total_nota) * summary_data['taxas']
+            else:
+                taxa_rateada = Decimal('0')
 
             if trade['nrNota']:
                 stmt = select(registroNotasSwing).where(registroNotasSwing.nrNota == trade['nrNota'])
@@ -344,6 +430,8 @@ def process_swing_pdf(pdf_path: str, external_session: Session = None) -> bool:
                 nCliente=trade['nCliente'],
                 corretora=trade['corretora'],
                 nrNota=trade['nrNota'],
+                isDayTrade=trade['isDayTrade'],
+                taxaRateada=taxa_rateada.quantize(Decimal('0.0001')),
             )
             try:
                 session.add(op)

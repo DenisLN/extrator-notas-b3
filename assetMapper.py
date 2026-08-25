@@ -10,6 +10,23 @@ YAML_PATH = "missing_assets.yaml"
 TICKER_REGEX = re.compile(r'\b[A-Z0-9]{4}\d{1,2}\b')
 yaml_lock = threading.Lock()
 
+
+def classificar_tipo_ativo(ticker: str) -> str:
+    """
+    Classifica um ticker B3 pelo sufixo numérico.
+    ticker já deve ser o nome fantasia (ex: "BRCO11", "RADL3", "ROXO34").
+    """
+    codigo = ticker.split()[0].upper()
+    match = re.search(r'(\d+)$', codigo)
+    if not match:
+        return "ACAO"
+    sufixo = int(match.group(1))
+    if sufixo == 11:
+        return "FII"
+    if sufixo in {33, 34, 35, 39}:
+        return "BDR"
+    return "ACAO"
+
 def normalize_name(s: str) -> str:
     return re.sub(r'[^A-Z0-9]', '', str(s or "").upper())
 
@@ -40,7 +57,11 @@ def resolve_asset_names(session: Session, asset_names: list[str]) -> dict[str, s
                             select(registroNomeAtivos).where(registroNomeAtivos.nomeAtivo == nome_ativo)
                         ).first()
                         if not existing:
-                            reg = registroNomeAtivos(nomeAtivo=nome_ativo, nomeFantasia=ticker_clean)
+                            reg = registroNomeAtivos(
+                                nomeAtivo=nome_ativo,
+                                nomeFantasia=ticker_clean,
+                                tipoAtivo=classificar_tipo_ativo(ticker_clean),
+                            )
                             session.add(reg)
                             new_entries = True
                 
@@ -70,7 +91,11 @@ def resolve_asset_names(session: Session, asset_names: list[str]) -> dict[str, s
                 if db_norm and len(db_norm) >= 4:
                     if db_norm == name_norm or db_norm in name_norm or name_norm in db_norm:
                         mapped[name] = entry.nomeFantasia
-                        reg = registroNomeAtivos(nomeAtivo=name, nomeFantasia=entry.nomeFantasia)
+                        reg = registroNomeAtivos(
+                            nomeAtivo=name,
+                            nomeFantasia=entry.nomeFantasia,
+                            tipoAtivo=classificar_tipo_ativo(entry.nomeFantasia),
+                        )
                         session.add(reg)
                         new_matches = True
                         match_found = True
@@ -89,7 +114,11 @@ def resolve_asset_names(session: Session, asset_names: list[str]) -> dict[str, s
     for name in missing:
         ticker_found = extract_ticker_from_name(name)
         if ticker_found:
-            reg = registroNomeAtivos(nomeAtivo=name, nomeFantasia=ticker_found)
+            reg = registroNomeAtivos(
+                nomeAtivo=name,
+                nomeFantasia=ticker_found,
+                tipoAtivo=classificar_tipo_ativo(ticker_found),
+            )
             session.add(reg)
             mapped[name] = ticker_found
             new_auto_entries = True
@@ -144,7 +173,11 @@ def resolve_asset_names(session: Session, asset_names: list[str]) -> dict[str, s
                         if ticker and str(ticker).strip():
                             ticker_clean = str(ticker).strip().upper()
                             mapped[m] = ticker_clean
-                            reg = registroNomeAtivos(nomeAtivo=m, nomeFantasia=ticker_clean)
+                            reg = registroNomeAtivos(
+                                nomeAtivo=m,
+                                nomeFantasia=ticker_clean,
+                                tipoAtivo=classificar_tipo_ativo(ticker_clean),
+                            )
                             session.add(reg)
                         else:
                             still_missing.append(m)
@@ -173,3 +206,27 @@ def resolve_asset_names(session: Session, asset_names: list[str]) -> dict[str, s
                 pass
 
     return mapped
+
+
+def resolve_asset_names_with_type(session: Session, asset_names: list[str]) -> dict[str, dict] | None:
+    """
+    Equivalente a resolve_asset_names, mas retorna um dict enriquecido com tipoAtivo:
+        { nomeAtivo: {"nomeFantasia": str, "tipoAtivo": str} }
+    Retorna None se resolve_asset_names retornar None.
+    """
+    mapped = resolve_asset_names(session, asset_names)
+    if mapped is None:
+        return None
+
+    # Buscar tipoAtivo para todos os nomeFantasia resolvidos
+    fantasias = list(set(mapped.values()))
+    stmt = select(registroNomeAtivos).where(registroNomeAtivos.nomeFantasia.in_(fantasias))
+    db_entries = session.exec(stmt).all()
+    tipo_por_fantasia: dict[str, str] = {e.nomeFantasia: e.tipoAtivo for e in db_entries if e.tipoAtivo}
+
+    result: dict[str, dict] = {}
+    for nome_ativo, nome_fantasia in mapped.items():
+        tipo = tipo_por_fantasia.get(nome_fantasia) or classificar_tipo_ativo(nome_fantasia)
+        result[nome_ativo] = {"nomeFantasia": nome_fantasia, "tipoAtivo": tipo}
+
+    return result

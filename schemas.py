@@ -31,7 +31,8 @@ class operacoesSwingtrade(SQLModel, table=True):
                                        "nCliente",
                                        "nomeAtivo",
                                        "operacaoTipo",
-                                       "nrNota"),
+                                       "nrNota",
+                                       "isDayTrade"),
                       )
     id: int | None = Field(default=None, primary_key=True)
     data: date = Field(index=True)
@@ -44,6 +45,8 @@ class operacoesSwingtrade(SQLModel, table=True):
     nCliente: str
     corretora: str
     nrNota: int
+    isDayTrade: bool = Field(default=False, index=True)
+    taxaRateada: Decimal = Field(default=Decimal('0'), max_digits=10, decimal_places=4)
 
 class registroNotasSwing(SQLModel, table=True): 
     __table_args__ = (UniqueConstraint("corretora",
@@ -60,12 +63,39 @@ class registroNotasSwing(SQLModel, table=True):
     hashNota: str = Field(index=True, nullable=False)
     taxas: Decimal = Field(max_digits=10, decimal_places=2)
     irrf: Decimal = Field(max_digits=10, decimal_places=2)
+    irrfTotal: Decimal | None = Field(default=None, max_digits=10, decimal_places=2)
+    irrfAcao: Decimal | None = Field(default=None, max_digits=10, decimal_places=2)
+    irrfFii: Decimal | None = Field(default=None, max_digits=10, decimal_places=2)
+    irrfEtf: Decimal | None = Field(default=None, max_digits=10, decimal_places=2)
+    irrfBdr: Decimal | None = Field(default=None, max_digits=10, decimal_places=2)
+    irrfDay: Decimal | None = Field(default=None, max_digits=10, decimal_places=2)
     liquidoCalc: Decimal = Field(max_digits=10, decimal_places=2)
     liquidoReal: Decimal = Field(max_digits=10, decimal_places=2)
     ativosNegociados: Dict[str, Any] = Field(default_factory=dict,
                                              sa_column=Column(JSONB)
                                             )
     relativePath: str
+
+class resultadoMensalSwing(SQLModel, table=True):
+    __table_args__ = (UniqueConstraint("cpf", "ano_mes", "tipoAtivo"),)
+    id: int | None = Field(default=None, primary_key=True)
+    cpf: str = Field(index=True)
+    ano_mes: str = Field(index=True)          # formato: "2026-03"
+    tipoAtivo: str                            # "ACAO", "FII" ou "BDR"
+    lucro_prejuizo: Decimal = Field(max_digits=10, decimal_places=2)
+    volume_vendas: Decimal = Field(max_digits=10, decimal_places=2)
+    isento: bool                              # True se ações < R$20.000/mês com lucro
+
+class posicaoSwing(SQLModel, table=True):
+    __table_args__ = (UniqueConstraint("cpf", "nomeAtivo"),)
+    id: int | None = Field(default=None, primary_key=True)
+    cpf: str = Field(index=True)
+    nomeAtivo: str = Field(index=True)
+    tipoAtivo: str
+    quantidade: int                           # INTEIRO, nunca Decimal
+    precoMedio: Decimal = Field(max_digits=10, decimal_places=4)
+    custoTotal: Decimal = Field(max_digits=10, decimal_places=2)
+    ultimaAtualizacao: date
 
 class registroNomeAtivos(SQLModel, table=True): 
     __table_args__ = (UniqueConstraint("nomeAtivo",
@@ -74,6 +104,7 @@ class registroNomeAtivos(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     nomeAtivo: str = Field(index=True)
     nomeFantasia: str = Field(index=True)
+    tipoAtivo: str | None = Field(default=None, index=True)
 
 class eventosCorporativos(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)

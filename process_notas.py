@@ -8,13 +8,20 @@ import argparse
 import sys
 from datetime import datetime
 from pathlib import Path
+from dotenv import load_dotenv
 from sqlmodel import Session, select
+
+# Carrega as variáveis de ambiente do arquivo .env
+load_dotenv()
 
 from areaCodes import areaDict_day_or_swing, areaDict_xp_swing, areaDict_btg_swing, areaDict_xp_day, areaDict_btg_day, brokerName_swing, brokerName_day
 from cleanupFunctions import cleanup_dict
 from extractSwing import process_swing_pdf, engine
 from extractDay import process_day_pdf
 from schemas import operacoesSwingtrade
+
+# URL do banco de dados configurada via .env
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 # Configuração de diretórios
 INPUT_DIR = Path("notas")
@@ -67,12 +74,11 @@ def backup_database():
         backup_dir.mkdir(exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_file = backup_dir / f"notasDaytrade_backup_{timestamp}.sql"
-        
-        db_url = "postgresql://denis:nata@aspire5050:5432/notasDaytrade"
+
         logging.info(f"Criando snapshot do banco de dados em '{backup_file}'...")
-        
+
         process = subprocess.run(
-            ["pg_dump", "-c", db_url, "-f", str(backup_file)],
+            ["pg_dump", "-c", DATABASE_URL, "-f", str(backup_file)],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True
@@ -83,17 +89,17 @@ def backup_database():
         else:
             logging.error(f"Falha ao criar snapshot do banco (pg_dump): {process.stderr}")
             return False
-            
+
     except FileNotFoundError:
-        logging.error("O comando 'pg_dump' não foi encontrado. O PostgreSQL client (pg_dump) precisa estar instalado e no PATH do Windows.")
+        logging.error("O comando 'pg_dump' não foi encontrado. O PostgreSQL client (pg_dump) precisa estar instalado e no PATH do sistema.")
         return False
     except Exception as e:
         logging.error(f"Erro inesperado ao criar snapshot: {e}")
         return False
 
 def process_batch():
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-    
+    logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
+
     if not INPUT_DIR.exists():
         print(f"Diretório de entrada '{INPUT_DIR}' não encontrado.")
         return
@@ -186,6 +192,13 @@ def process_batch():
                     if success:
                         notas_swing += 1
                         try:
+                            from computeSwing import recalcular_swing
+                            from db_connection import get_session as get_db_session
+                            with get_db_session() as session_compute:
+                                recalcular_swing(cpf=n_cliente, session=session_compute)
+                        except Exception as e:
+                            logging.error(f"Erro ao recalcular swing para CPF {n_cliente}: {e}")
+                        try:
                             with Session(engine) as session:
                                 n_nota_int = int(nr_nota) if nr_nota else 0
                                 ops = session.exec(select(operacoesSwingtrade).where(
@@ -208,7 +221,7 @@ def process_batch():
                 note_pages = []
 
         doc_src.close()
-        
+
         if all_success:
             try:
                 os.remove(pdf_path)
@@ -225,14 +238,12 @@ def process_batch():
     print(f"notas day trade: {notas_day}")
     print("="*40 + "\n")
 
-    print("="*40 + "\n")
-
 def restore_database(backup_name):
     backup_dir = Path("backups")
     if not backup_dir.exists():
         logging.error("Diretório de backups não encontrado.")
         return False
-        
+
     if backup_name == 'last':
         backups = list(backup_dir.glob("*.sql"))
         if not backups:
@@ -247,11 +258,10 @@ def restore_database(backup_name):
                 logging.error(f"Backup não encontrado: {backup_name}")
                 return False
 
-    db_url = "postgresql://denis:nata@aspire5050:5432/notasDaytrade"
     logging.info(f"Restaurando banco de dados a partir de '{backup_file}'...")
-    
+
     process = subprocess.run(
-        ["psql", db_url, "-f", str(backup_file)],
+        ["psql", DATABASE_URL, "-f", str(backup_file)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True

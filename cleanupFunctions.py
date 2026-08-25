@@ -81,10 +81,25 @@ def clean_nome_ativo(text):
     text = re.sub(r'[\s@#*]+$', '', text).strip()
     return text
 
+def clean_irrf_day(text):
+    text = str(text or "").strip()
+    if "Projeção R$" in text:
+        parts = text.split("Projeção R$")
+        if len(parts) > 1:
+            val_str = parts[1].strip().split()[0]
+            return clean_decimal(val_str)
+    elif "Projeo R$" in text:
+        parts = text.split("Projeo R$")
+        if len(parts) > 1:
+            val_str = parts[1].strip().split()[0]
+            return clean_decimal(val_str)
+    return Decimal('0.00')
+
 cleanup_dict = { 
                  "liquido": text_to_numbers,
                  "semiLiquido": text_to_numbers,
                  "irrf": text_to_numbers,
+                 "irrfDay": clean_irrf_day,
                  "data": date_to_datetime,
                  "cpf": clean_cpf,
                  "nCliente": clean_n_cliente,
