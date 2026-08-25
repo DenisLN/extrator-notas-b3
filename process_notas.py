@@ -97,7 +97,7 @@ def backup_database():
         logging.error(f"Erro inesperado ao criar snapshot: {e}")
         return False
 
-def process_batch():
+def process_batch(dry_run: bool = False):
     logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
 
     if not INPUT_DIR.exists():
@@ -110,10 +110,13 @@ def process_batch():
     if not pdf_files:
         return
 
-    logging.info("Iniciando processo de snapshot do banco de dados antes do processamento...")
-    if not backup_database():
-        logging.warning("⚠️  Processamento abortado porque o snapshot falhou. Para sua segurança, resolva o erro do pg_dump ou comente a chamada de backup.")
-        return
+    if dry_run:
+        logging.info("🧪 [DRY-RUN ATIVO] MODO SIMULAÇÃO: Nenhum backup será feito, nenhum PDF será apagado/movido e nada será gravado no DB.")
+    else:
+        logging.info("Iniciando processo de snapshot do banco de dados antes do processamento...")
+        if not backup_database():
+            logging.warning("⚠️  Processamento abortado porque o snapshot falhou. Para sua segurança, resolva o erro do pg_dump ou comente a chamada de backup.")
+            return
 
     ativos_negociados = set()
     notas_swing = 0
@@ -172,46 +175,53 @@ def process_batch():
                 date_formatted = data_obj.strftime("%d-%m-%Y") if (data_obj and hasattr(data_obj, 'strftime')) else "01-01-2026"
 
                 dest_dir = OUTPUT_DIR / n_cliente / year_str / month_str
-                dest_dir.mkdir(parents=True, exist_ok=True)
+                if not dry_run:
+                    dest_dir.mkdir(parents=True, exist_ok=True)
 
                 prefix = "D@" if trade_type == "DAY" else "S@"
                 isolated_filename = f"{prefix}{date_formatted}@{nr_nota}@{n_cliente}.pdf"
                 isolated_filepath = dest_dir / isolated_filename
 
-                if not isolated_filepath.exists():
-                    new_doc = pymu.open()
-                    new_doc.insert_pdf(doc_src, from_page=start_page_idx, to_page=end_page_idx)
-                    new_doc.save(str(isolated_filepath))
-                    new_doc.close()
+                if not dry_run:
+                    if not isolated_filepath.exists():
+                        new_doc = pymu.open()
+                        new_doc.insert_pdf(doc_src, from_page=start_page_idx, to_page=end_page_idx)
+                        new_doc.save(str(isolated_filepath))
+                        new_doc.close()
+                    else:
+                        print(f"⏩ Nota já existe no disco: '{isolated_filepath.name}'")
                 else:
-                    print(f"⏩ Nota já existe no disco: '{isolated_filepath.name}'")
+                    logging.info(f"🧪 [DRY-RUN] Isolação de nota simulada para: {isolated_filename}")
 
                 success = False
+                target_file_to_process = str(isolated_filepath) if not dry_run else str(pdf_path)
+
                 if trade_type == "SWING":
-                    success = process_swing_pdf(str(isolated_filepath))
+                    success = process_swing_pdf(target_file_to_process, dry_run=dry_run)
                     if success:
                         notas_swing += 1
-                        try:
-                            from computeSwing import recalcular_swing
-                            from db_connection import get_session as get_db_session
-                            with get_db_session() as session_compute:
-                                recalcular_swing(cpf=n_cliente, session=session_compute)
-                        except Exception as e:
-                            logging.error(f"Erro ao recalcular swing para CPF {n_cliente}: {e}")
-                        try:
-                            with Session(engine) as session:
-                                n_nota_int = int(nr_nota) if nr_nota else 0
-                                ops = session.exec(select(operacoesSwingtrade).where(
-                                    operacoesSwingtrade.nCliente == n_cliente,
-                                    operacoesSwingtrade.data == data_obj.date() if hasattr(data_obj, 'date') else None,
-                                    operacoesSwingtrade.nrNota == n_nota_int
-                                )).all()
-                                for op in ops:
-                                    ativos_negociados.add(op.nomeAtivo)
-                        except Exception as e:
-                            logging.error(f"Erro ao buscar ativos no banco: {e}")
+                        if not dry_run:
+                            try:
+                                from computeSwing import recalcular_swing
+                                from db_connection import get_session as get_db_session
+                                with get_db_session() as session_compute:
+                                    recalcular_swing(cpf=n_cliente, session=session_compute)
+                            except Exception as e:
+                                logging.error(f"Erro ao recalcular swing para CPF {n_cliente}: {e}")
+                            try:
+                                with Session(engine) as session:
+                                    n_nota_int = int(nr_nota) if nr_nota else 0
+                                    ops = session.exec(select(operacoesSwingtrade).where(
+                                        operacoesSwingtrade.nCliente == n_cliente,
+                                        operacoesSwingtrade.data == data_obj.date() if hasattr(data_obj, 'date') else None,
+                                        operacoesSwingtrade.nrNota == n_nota_int
+                                    )).all()
+                                    for op in ops:
+                                        ativos_negociados.add(op.nomeAtivo)
+                            except Exception as e:
+                                logging.error(f"Erro ao buscar ativos no banco: {e}")
                 else:
-                    success = process_day_pdf(str(isolated_filepath))
+                    success = process_day_pdf(target_file_to_process)
                     if success:
                         notas_day += 1
 
@@ -222,14 +232,14 @@ def process_batch():
 
         doc_src.close()
 
-        if all_success:
+        if all_success and not dry_run:
             try:
                 os.remove(pdf_path)
                 print(f"✅ Arquivo original apagado: {pdf_path}")
             except Exception as e:
                 print(f"Erro ao apagar arquivo original {pdf_path}: {e}")
-        else:
-            print(f"⚠️ Algumas notas não puderam ser processadas no arquivo: {pdf_path}")
+        elif dry_run:
+            print(f"🧪 [DRY-RUN] O arquivo original NÃO foi alterado/removido: {pdf_path}")
 
     print("\n" + "="*40)
     ativos_str = ", ".join(sorted(list(ativos_negociados))) if ativos_negociados else "Nenhum detectado"
@@ -277,6 +287,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Processa notas de corretagem.")
     parser.add_argument("--restore-last", action="store_true", help="Restaura o último backup feito e sai.")
     parser.add_argument("--restore", type=str, metavar="NOME", help="Restaura um backup específico da pasta backups/ e sai.")
+    parser.add_argument("--dry-run", action="store_true", help="Executa o fluxo em modo simulação sem alterar o banco de dados nem mover/deletar arquivos.")
     args = parser.parse_args()
 
     if args.restore_last:
@@ -286,4 +297,4 @@ if __name__ == "__main__":
         restore_database(args.restore)
         sys.exit(0)
 
-    process_batch()
+    process_batch(dry_run=args.dry_run)

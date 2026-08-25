@@ -41,7 +41,7 @@ logging.getLogger("pdfminer").setLevel(logging.WARNING)
 
 SQLModel.metadata.create_all(engine)
 
-def process_swing_pdf(pdf_path: str, external_session: Session = None) -> bool:
+def process_swing_pdf(pdf_path: str, external_session: Session = None, dry_run: bool = False) -> bool:
     with open(pdf_path, "rb") as f:
         file_hash = xxhash.xxh64(f.read()).hexdigest()
 
@@ -354,7 +354,7 @@ def process_swing_pdf(pdf_path: str, external_session: Session = None) -> bool:
 
         if irrf_reportado > Decimal('0.00') and abs(irrf_calculado - irrf_reportado) > TOLERANCIA:
             logging.error(
-                f"🚨 FAILSAFE IRRF: IRRF calculado ({irrf_calculado}) difere do reportado na nota ({irrf_reportado}). "
+                f"🚨 FAILSAFE IRRF: IRRF calculated ({irrf_calculado}) difere do reportado na nota ({irrf_reportado}). "
                 f"Diferença: {abs(irrf_calculado - irrf_reportado)}. Abortando nota {last_header.get('nrNota')}. "
                 f"Arquivo: {pdf_path}"
             )
@@ -365,6 +365,11 @@ def process_swing_pdf(pdf_path: str, external_session: Session = None) -> bool:
                 )
             return False
         # --- FIM DO FAILSAFE ---
+
+        if dry_run:
+            logging.info(f"🧪 [DRY-RUN] Nota nº {last_header.get('nrNota')} simulada com sucesso (nenhuma alteração persistida no banco).")
+            session.rollback()
+            return True
 
         rel_path = str(pdf_path).replace("z:\\", "").replace("Z:\\", "").replace("z:/", "").replace("Z:/", "").replace("/mnt/", "")
         rel_path = rel_path.replace("Projetos\\notascorretagem\\", "").replace("Projetos/notascorretagem/", "")
