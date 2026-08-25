@@ -24,8 +24,17 @@ from schemas import operacoesSwingtrade
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 # Configuração de diretórios
-INPUT_DIR = Path("notas")
-OUTPUT_DIR = Path("Z:/3 Notas Corretagem") if os.path.exists("Z:/3 Notas Corretagem") else Path("z:/3 Notas Corretagem") if os.path.exists("z:/3 Notas Corretagem") else Path("/mnt/3 Notas Corretagem") if os.path.exists("/mnt/3 Notas Corretagem") else Path("./3 Notas Corretagem")
+INPUT_DIR = Path(os.getenv("INPUT_DIR", "notas"))
+_output_dir_env = os.getenv("OUTPUT_DIR")
+if _output_dir_env:
+    OUTPUT_DIR = Path(_output_dir_env)
+else:
+    OUTPUT_DIR = (
+        Path("Z:/3 Notas Corretagem") if os.path.exists("Z:/3 Notas Corretagem")
+        else Path("z:/3 Notas Corretagem") if os.path.exists("z:/3 Notas Corretagem")
+        else Path("/mnt/3 Notas Corretagem") if os.path.exists("/mnt/3 Notas Corretagem")
+        else Path("./3 Notas Corretagem")
+    )
 
 MONTH_MAP = {
     1: "01 - JAN", 2: "02 - FEV", 3: "03 - MAR", 4: "04 - ABR",

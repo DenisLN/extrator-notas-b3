@@ -12,17 +12,17 @@ from pathlib import Path
 SQLModel.metadata.create_all(engine)
 
 
-def handle_files(directory):
+def handle_files(directory, dry_run: bool = False):
     for pdf_path in directory.rglob("*.pdf"):
         logging.info(pdf_path)
         try: 
-            process_day_pdf(str(pdf_path))
+            process_day_pdf(str(pdf_path), dry_run=dry_run)
         except Exception as e: 
             logging.error(e)
             exit()
 
 
-def process_day_pdf(pdf_path: str, external_session: Session = None) -> bool:
+def process_day_pdf(pdf_path: str, external_session: Session = None, dry_run: bool = False) -> bool:
     with open(pdf_path, "rb") as f:
         file_hash = xxhash.xxh64(f.read()).hexdigest()
 
@@ -84,6 +84,11 @@ def process_day_pdf(pdf_path: str, external_session: Session = None) -> bool:
     dados = [notasDaytrade(**dado) for dado in linhas]
 
     def execute_persistence(session: Session) -> bool:
+        if dry_run:
+            logging.info(f"🧪 [DRY-RUN] Day Trade PDF simulado com sucesso: {pdf_path} (nenhuma alteração persistida no banco).")
+            session.rollback()
+            return True
+
         for dado in dados: 
             try:
                 session.add(dado)

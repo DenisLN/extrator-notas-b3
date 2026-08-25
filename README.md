@@ -125,15 +125,17 @@ pip install -r requirements.txt
 > [!IMPORTANT]
 > Os diretórios `venv/` e `env/` estão no `.gitignore`. Crie o ambiente virtual com qualquer um desses nomes para que ele não seja versionado acidentalmente.
 
-### 4. Configuração de credenciais
+### 4. Configuração de credenciais e diretórios
 
-O projeto usa um setup interativo que gera os arquivos de credenciais (`.env` para o backend e `.streamlit/secrets.toml` para o frontend). Nenhum desses arquivos é versionado — estão todos no `.gitignore`.
+O projeto usa um setup interativo que gera os arquivos de configuração (`.env` para o backend e `.streamlit/secrets.toml` para o frontend). Nenhum desses arquivos é versionado — estão todos no `.gitignore`.
 
 ```bash
 python scripts/setup_env.py
 ```
 
-O script vai pedir: **usuário**, **senha**, **host**, **porta** e **nome do banco** (use `notas_corretagem`).
+O script solicitará interativamente:
+- **Banco de dados**: usuário, senha, host, porta e nome do banco (padrão `notas_corretagem`).
+- **Diretórios**: diretório de entrada de notas (`INPUT_DIR`, padrão `notas`) e diretório de saída para arquivamento organizado (`OUTPUT_DIR`, ex: `Z:/3 Notas Corretagem`).
 
 ### 5. Extração de notas
 
