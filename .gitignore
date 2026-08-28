@@ -11,6 +11,7 @@ frontend/db_connection.py
 
 # Arquivos sensíveis
 *.pdf
+*.txt
 
 # Pasta scripts, exceto testAreas.py e setup_env.py
 scripts/*

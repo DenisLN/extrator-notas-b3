@@ -1,5 +1,6 @@
-from datetime import datetime
-from decimal import Decimal
+from datetime import datetime, date
+from decimal import Decimal, InvalidOperation
+import re
 
 def clean_int(text): 
     text = str(text or "0").strip()
@@ -11,42 +12,46 @@ def clean_int(text):
 
 def clean_decimal(text): 
     text = str(text or "0").strip()
-    text = text.split()[-1]
+    text = text.split()[-1] if text.split() else "0"
     text = text.replace(".", "")
     text = text.replace(",", ".")
     try: 
         return Decimal(text)
-    except Exception: 
-        return Decimal("0")
+    except (InvalidOperation, ValueError, Exception): 
+        return Decimal("0.00")
 
 def text_to_numbers(text): 
-    text = str(text).strip()
+    text = str(text or "0").strip()
 
-    neg = "D" in text.upper()
+    neg = "D" in text.upper() or "-" in text
     text = text.split("|")[0].strip()
     text = text.replace("\n", "")
     text = text.replace(".", "")
     text = text.replace(",", ".")
+    # Limpa caracteres não numéricos restantes mantendo o ponto decimal
+    text = re.sub(r'[^0-9.]', '', text)
 
     try: 
-        num = float(text)
-    except ValueError: 
-        return 0.0
+        num = Decimal(text) if text else Decimal("0.00")
+    except (InvalidOperation, ValueError, Exception): 
+        num = Decimal("0.00")
+    
     if neg: 
         num = -abs(num)
     return num
-
-import re
 
 def date_to_datetime(text): 
     text = str(text or "").strip()
     match = re.search(r'\b\d{2}/\d{2}/\d{4}\b', text)
     if match:
         try:
-            return datetime.strptime(match.group(0), "%d/%m/%Y")
+            return datetime.strptime(match.group(0), "%d/%m/%Y").date()
         except Exception:
             pass
-    return datetime.today()
+    return date.today()
+
+# Alias mantido para compatibilidade de nomenclatura
+date_to_date = date_to_datetime
 
 def placeholder(text):
     return text
@@ -75,6 +80,7 @@ def clean_n_cliente(text):
     matches = re.findall(r'\d{4,}', text)
     if matches:
         return str(int(matches[0]))
+    return ""
 
 def clean_nome_ativo(text):
     text = str(text or "").strip()
