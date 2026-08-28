@@ -1,39 +1,45 @@
+import logging
 import xxhash
+import pymupdf as pymu
+from pathlib import Path
+from sqlmodel import Session
+from sqlalchemy.exc import IntegrityError
+
 from areaCodes import areaDict_btg_day, areaDict_xp_day, brokerName_day
 from schemas import * 
 from cleanupFunctions import cleanup_dict
-import logging
-import pymupdf as pymu
-from sqlmodel import Session
 from db_connection import engine, get_session
-from sqlalchemy.exc import IntegrityError
-from pathlib import Path
 
 SQLModel.metadata.create_all(engine)
 
 
 def handle_files(directory, dry_run: bool = False):
     for pdf_path in directory.rglob("*.pdf"):
-        logging.info(pdf_path)
+        logging.info(f"📁 Processando arquivo: {pdf_path}")
         try: 
             process_day_pdf(str(pdf_path), dry_run=dry_run)
         except Exception as e: 
-            logging.error(e)
+            logging.exception(f"💥 Erro fatal ao processar {pdf_path}: {e}")
             exit()
 
 
 def process_day_pdf(pdf_path: str, external_session: Session = None, dry_run: bool = False) -> bool:
+    logging.debug(f"Iniciando leitura do PDF: {pdf_path}")
     with open(pdf_path, "rb") as f:
         file_hash = xxhash.xxh64(f.read()).hexdigest()
+    logging.debug(f"Hash xxHash64 gerado: {file_hash}")
 
     doc = pymu.open(pdf_path)
     doc_len = len(doc)
+    logging.debug(f"Total de páginas no documento: {doc_len}")
+    
     start_page = doc[0]
     coordmap = {}
     broker = ''
 
     for entry in brokerName_day: 
         bloco = start_page.get_textbox(brokerName_day[entry])
+        logging.debug(f"Checando corretora no bbox '{entry}': {repr(bloco)}")
         if "BTG" in bloco: 
             coordmap = areaDict_btg_day
             broker = 'BTG'
@@ -44,17 +50,20 @@ def process_day_pdf(pdf_path: str, external_session: Session = None, dry_run: bo
             break
 
     if not coordmap: 
-        logging.error("Impossível Distinguir Corretora.")
+        logging.error(f"❌ Impossível Distinguir Corretora para o arquivo: {pdf_path}")
         return False
-    logging.info(f"broker: {broker}")
+    logging.info(f"Corretora identificada: {broker}")
 
     i = 0
     linhas = [] 
     while i < doc_len: 
         page = doc[i]
-        bloco = page.get_textbox(coordmap['liquido'])
-        if bloco == " |":
-            i = i + 1
+        bloco_liquido = page.get_textbox(coordmap['liquido'])
+        logging.debug(f"Página {i+1}/{doc_len} - Checagem 'liquido': {repr(bloco_liquido)}")
+
+        if bloco_liquido == " |":
+            logging.debug(f"Página {i+1} ignorada (indicador de continuação '|').")
+            i += 1
         else: 
             linha = {}
             linha['corretora'] = broker
@@ -67,25 +76,42 @@ def process_day_pdf(pdf_path: str, external_session: Session = None, dry_run: bo
             for entry in coordmap: 
                 if entry == 'continua' or entry not in cleanup_dict:
                     continue
-                bloco = page.get_textbox(coordmap[entry])
-                bloco = cleanup_dict[entry](bloco)
-                linha[entry] = bloco
+                raw_text = page.get_textbox(coordmap[entry])
+                clean_text = cleanup_dict[entry](raw_text)
+                logging.debug(f"Campo '{entry}': raw={repr(raw_text)} -> clean={repr(clean_text)}")
+                linha[entry] = clean_text
                 
+            logging.debug(f"Dados brutos extraídos da página {i+1}: {linha}")
+
             # Validar dados fundamentais
             if not linha.get('data') or not linha.get('nCliente') or not linha.get('nrNota'):
-                logging.warning(f"⚠️  Falha ao extrair dados fundamentais no Day Trade: {pdf_path}")
+                logging.warning(f"⚠️ Falha ao extrair dados fundamentais no Day Trade: {pdf_path}")
                 with open("arquivos_sem_texto.txt", "a", encoding="utf-8") as f_out:
                     f_out.write(pdf_path + "\n")
                 return False
                 
             linhas.append(linha)
-            i = i + 1
+            i += 1
 
-    dados = [notasDaytrade(**dado) for dado in linhas]
+    # Conversão de dicts para modelos SQLModel
+    dados = []
+    for idx, d in enumerate(linhas):
+        try:
+            obj = notasDaytrade(**d)
+            dados.append(obj)
+            # Converte o objeto para dict para o log exibir as chaves/valores
+            payload = obj.model_dump() if hasattr(obj, "model_dump") else obj.__dict__
+            logging.debug(f"Objeto notasDaytrade [{idx}] montado com sucesso: {payload}")
+        except Exception as err:
+            logging.error(f"Erro ao instanciar notasDaytrade para a linha {idx}: {err}")
+            logging.debug(f"Conteúdo da linha com falha: {d}")
 
     def execute_persistence(session: Session) -> bool:
         if dry_run:
-            logging.info(f"🧪 [DRY-RUN] Day Trade PDF simulado com sucesso: {pdf_path} (nenhuma alteração persistida no banco).")
+            logging.info(f"🧪 [DRY-RUN] Day Trade PDF simulado com sucesso: {pdf_path}")
+            for idx, dado in enumerate(dados):
+                payload = dado.model_dump() if hasattr(dado, "model_dump") else dado.__dict__
+                logging.info(f"🧪 [DRY-RUN] Registro [{idx}]: {payload}")
             session.rollback()
             return True
 
@@ -93,13 +119,14 @@ def process_day_pdf(pdf_path: str, external_session: Session = None, dry_run: bo
             try:
                 session.add(dado)
                 session.commit()
-                logging.info(f"dado aceito na base de dados: {dado}")
+                payload = dado.model_dump() if hasattr(dado, "model_dump") else dado.__dict__
+                logging.info(f"✅ Dado persistido no banco: {payload}")
             except IntegrityError: 
                 session.rollback()
-                logging.error("dado duplicado :(")
+                logging.warning(f"⚠️ Dado duplicado retido por constraint: nrNota/hashNota")
             except Exception as e: 
                 session.rollback()
-                logging.error(f"python surtou: {e}") 
+                logging.error(f"❌ Erro ao gravar no banco: {e}") 
                 return False
         return True
 
@@ -112,7 +139,11 @@ def process_day_pdf(pdf_path: str, external_session: Session = None, dry_run: bo
     finally:
         doc.close()
 
+
 if __name__ == "__main__": 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s - %(levelname)s - %(message)s"
+    )
     directory = Path("/mnt/Projetos/notascorretagem/notas")
     handle_files(directory)

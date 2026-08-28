@@ -16,7 +16,7 @@ areaDict_xp_day = {
 	'liquido': Rect(458, 709, 559, 717),
 	'semiLiquido': Rect(352, 709, 453, 717),
 	'irrf': Rect(140, 667, 241, 675),
-	'data': Rect(520, 59, 554, 69),
+	'data': Rect(518, 59, 560, 69),
 	'cpf': Rect(473, 135, 527, 144),
 	'nCliente': Rect(479, 152, 516, 160),
 }

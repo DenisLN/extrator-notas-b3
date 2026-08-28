@@ -230,7 +230,7 @@ def process_batch(dry_run: bool = False):
                             except Exception as e:
                                 logging.error(f"Erro ao buscar ativos no banco: {e}")
                 else:
-                    success = process_day_pdf(target_file_to_process)
+                    success = process_day_pdf(target_file_to_process, dry_run=dry_run)
                     if success:
                         notas_day += 1
 
