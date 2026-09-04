@@ -21,6 +21,7 @@ class notasDaytrade(SQLModel, table=True):
     cpf: str = Field(index=True)
     nCliente: str
     corretora: str
+    nrNota: int
     hashNota: str = Field(index=True, nullable=False)
     relativePath: str
 

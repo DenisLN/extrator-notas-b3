@@ -71,6 +71,20 @@ def process_day_pdf(pdf_path: str, external_session: Session = None, dry_run: bo
             
             rel_path = str(pdf_path).replace("z:\\", "").replace("Z:\\", "").replace("z:/", "").replace("Z:/", "").replace("/mnt/", "")
             rel_path = rel_path.replace("Projetos\\notascorretagem\\", "").replace("Projetos/notascorretagem/", "")
+            # Normaliza separadores e garante o prefixo "D@" no nome do arquivo,
+            # independente de process_day_pdf ter sido chamado a partir do
+            # arquivo já isolado por process_notas.py (que monta o nome com
+            # "D@...") ou diretamente sobre um PDF ainda sem esse prefixo.
+            # Bug histórico: quando chamado fora do fluxo de process_notas.py,
+            # o relativePath gravado ficava sem "D@", diferente do Swing Trade
+            # (extractSwing.py), que sempre recebe o arquivo já isolado com
+            # "S@". Isso deixou ~429 registros antigos no banco sem o prefixo
+            # mesmo o arquivo real em disco já tendo sido renomeado com "D@".
+            rel_path = rel_path.replace("\\", "/")
+            rel_dir, _, rel_filename = rel_path.rpartition("/")
+            if rel_filename and not rel_filename.startswith("D@"):
+                rel_filename = f"D@{rel_filename}"
+            rel_path = f"{rel_dir}/{rel_filename}" if rel_dir else rel_filename
             linha['relativePath'] = rel_path
             
             for entry in coordmap: 
