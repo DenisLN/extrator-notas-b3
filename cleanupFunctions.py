@@ -12,7 +12,7 @@ def clean_int(text):
 
 def clean_decimal(text): 
     text = str(text or "0").strip()
-    text = text.split()[-1] if text.split() else "0"
+    text = text.split()[-1] 
     text = text.replace(".", "")
     text = text.replace(",", ".")
     try: 
@@ -21,18 +21,16 @@ def clean_decimal(text):
         return Decimal("0.00")
 
 def text_to_numbers(text): 
-    text = str(text or "0").strip()
+    text = str(text).strip()
 
-    neg = "D" in text.upper() or "-" in text
+    neg = "D" in text.upper() 
     text = text.split("|")[0].strip()
     text = text.replace("\n", "")
     text = text.replace(".", "")
     text = text.replace(",", ".")
-    # Limpa caracteres não numéricos restantes mantendo o ponto decimal
-    text = re.sub(r'[^0-9.]', '', text)
 
     try: 
-        num = Decimal(text) if text else Decimal("0.00")
+        num = Decimal(text) 
     except (InvalidOperation, ValueError, Exception): 
         num = Decimal("0.00")
     

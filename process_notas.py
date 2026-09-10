@@ -6,6 +6,7 @@ import logging
 import subprocess
 import argparse
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
@@ -14,7 +15,10 @@ from sqlmodel import Session, select
 # Carrega as variáveis de ambiente do arquivo .env
 load_dotenv()
 
-from areaCodes import areaDict_day_or_swing, areaDict_xp_swing, areaDict_btg_swing, areaDict_xp_day, areaDict_btg_day, brokerName_swing, brokerName_day
+from areaCodes import (
+    areaDict_day_or_swing, areaDict_xp_swing, areaDict_btg_swing,
+    areaDict_xp_day, areaDict_btg_day, brokerName_swing, brokerName_day
+)
 from cleanupFunctions import cleanup_dict
 from extractSwing import process_swing_pdf, engine
 from extractDay import process_day_pdf
@@ -131,67 +135,78 @@ def process_batch(dry_run: bool = False):
     notas_swing = 0
     notas_day = 0
 
-    for pdf_path in pdf_files:
-        try:
-            doc_src = pymu.open(pdf_path)
-        except Exception as e:
-            logging.error(f"Erro ao abrir PDF {pdf_path}: {e}")
-            continue
+    temp_base_dir = Path("temp")
+    temp_base_dir.mkdir(exist_ok=True)
 
-        if len(doc_src) == 0 or len(doc_src[0].get_text().strip()) < 10:
-            logging.warning(f"⚠️  PDF sem texto extraível (escaneado/imagem): {pdf_path.name}")
-            doc_src.close()
-            continue
+    with tempfile.TemporaryDirectory(dir=temp_base_dir) as temp_dir:
+        base_output_dir = Path(temp_dir) if dry_run else OUTPUT_DIR
 
-        note_pages = []
-        doc_len = len(doc_src)
-        all_success = True
+        for pdf_path in pdf_files:
+            try:
+                doc_src = pymu.open(pdf_path)
+            except Exception as e:
+                logging.error(f"Erro ao abrir PDF {pdf_path}: {e}")
+                continue
 
-        for page_idx in range(doc_len):
-            page_pymu = doc_src[page_idx]
-            note_pages.append(page_idx)
+            if len(doc_src) == 0 or len(doc_src[0].get_text().strip()) < 10:
+                logging.warning(f"⚠️  PDF sem texto extraível (escaneado/imagem): {pdf_path.name}")
+                doc_src.close()
+                continue
 
-            trade_type, broker = detect_note_type(page_pymu)
-            coordmap = (areaDict_xp_swing if broker == "XP" else areaDict_btg_swing) if trade_type == "SWING" else (areaDict_xp_day if broker == "XP" else areaDict_btg_day)
+            note_pages = []
+            doc_len = len(doc_src)
+            all_success = True
 
-            if broker == "BTG":
-                if trade_type == "DAY" and 'continua' in coordmap:
-                    has_continua = "CONTINUA" in page_pymu.get_textbox(coordmap['continua']).upper()
-                elif trade_type == "SWING" and 'tableCustos' in coordmap:
-                    has_continua = "CONTINUA" in page_pymu.get_textbox(coordmap['tableCustos']).upper()
+            for page_idx in range(doc_len):
+                page_pymu = doc_src[page_idx]
+                note_pages.append(page_idx)
+
+                trade_type, broker = detect_note_type(page_pymu)
+                coordmap = (areaDict_xp_swing if broker == "XP" else areaDict_btg_swing) if trade_type == "SWING" else (areaDict_xp_day if broker == "XP" else areaDict_btg_day)
+
+                if broker == "BTG":
+                    if trade_type == "DAY" and 'liquido' in coordmap:
+                        # Notas Day Trade da BTG não têm a palavra "CONTINUA" em lugar nenhum
+                        # (o campo 'continua' do coordmap simplesmente nunca é preenchido nesse
+                        # layout). O indicador real de página intermediária é o campo 'liquido'
+                        # aparecer vazio, contendo só o separador "|" — mesmo critério usado em
+                        # extractDay.py para pular páginas. Só na última página o líquido vem
+                        # preenchido com o valor consolidado da nota.
+                        liquido_raw = page_pymu.get_textbox(coordmap['liquido']).strip()
+                        has_continua = (liquido_raw == "|")
+                    elif trade_type == "SWING" and 'tableCustos' in coordmap:
+                        has_continua = "CONTINUA" in page_pymu.get_textbox(coordmap['tableCustos']).upper()
+                    else:
+                        has_continua = "CONTINUA" in page_pymu.get_text().upper()
                 else:
                     has_continua = "CONTINUA" in page_pymu.get_text().upper()
-            else:
-                has_continua = "CONTINUA" in page_pymu.get_text().upper()
 
-            if not has_continua or page_idx == doc_len - 1:
-                start_page_idx = note_pages[0]
-                end_page_idx = note_pages[-1]
-                header_page = doc_src[start_page_idx]
+                if not has_continua or page_idx == doc_len - 1:
+                    start_page_idx = note_pages[0]
+                    end_page_idx = note_pages[-1]
+                    header_page = doc_src[start_page_idx]
 
-                n_cliente_raw = header_page.get_textbox(coordmap.get('nCliente', pymu.Rect(0,0,0,0))).strip()
-                n_cliente = cleanup_dict['nCliente'](n_cliente_raw) if n_cliente_raw else None
+                    n_cliente_raw = header_page.get_textbox(coordmap.get('nCliente', pymu.Rect(0,0,0,0))).strip()
+                    n_cliente = cleanup_dict['nCliente'](n_cliente_raw) if n_cliente_raw else None
 
-                data_raw = header_page.get_textbox(coordmap.get('data', pymu.Rect(0,0,0,0))).strip()
-                data_obj = cleanup_dict['data'](data_raw) if data_raw else None
+                    data_raw = header_page.get_textbox(coordmap.get('data', pymu.Rect(0,0,0,0))).strip()
+                    data_obj = cleanup_dict['data'](data_raw) if data_raw else None
 
-                nr_nota_raw = header_page.get_textbox(coordmap.get('nrNota', pymu.Rect(0,0,0,0))).strip() if 'nrNota' in coordmap else ""
-                nr_nota = cleanup_dict['nrNota'](nr_nota_raw) if nr_nota_raw else None
-                n_cliente = str(n_cliente) if n_cliente else "OUTROS"
+                    nr_nota_raw = header_page.get_textbox(coordmap.get('nrNota', pymu.Rect(0,0,0,0))).strip() if 'nrNota' in coordmap else ""
+                    nr_nota = cleanup_dict['nrNota'](nr_nota_raw) if nr_nota_raw else None
+                    n_cliente = str(n_cliente) if n_cliente else "OUTROS"
 
-                year_str = str(data_obj.year) if (data_obj and hasattr(data_obj, 'year')) else "ANOS_OUTROS"
-                month_str = MONTH_MAP.get(data_obj.month, "MES_OUTRO") if (data_obj and hasattr(data_obj, 'month')) else "MES_OUTRO"
-                date_formatted = data_obj.strftime("%d-%m-%Y") if (data_obj and hasattr(data_obj, 'strftime')) else "01-01-2026"
+                    year_str = str(data_obj.year) if (data_obj and hasattr(data_obj, 'year')) else "ANOS_OUTROS"
+                    month_str = MONTH_MAP.get(data_obj.month, "MES_OUTRO") if (data_obj and hasattr(data_obj, 'month')) else "MES_OUTRO"
+                    date_formatted = data_obj.strftime("%d-%m-%Y") if (data_obj and hasattr(data_obj, 'strftime')) else "01-01-2026"
 
-                dest_dir = OUTPUT_DIR / n_cliente / year_str / month_str
-                if not dry_run:
+                    dest_dir = base_output_dir / n_cliente / year_str / month_str
                     dest_dir.mkdir(parents=True, exist_ok=True)
 
-                prefix = "D@" if trade_type == "DAY" else "S@"
-                isolated_filename = f"{prefix}{date_formatted}@{nr_nota}@{n_cliente}.pdf"
-                isolated_filepath = dest_dir / isolated_filename
+                    prefix = "D@" if trade_type == "DAY" else "S@"
+                    isolated_filename = f"{prefix}{date_formatted}@{nr_nota}@{n_cliente}.pdf"
+                    isolated_filepath = dest_dir / isolated_filename
 
-                if not dry_run:
                     if not isolated_filepath.exists():
                         new_doc = pymu.open()
                         new_doc.insert_pdf(doc_src, from_page=start_page_idx, to_page=end_page_idx)
@@ -199,56 +214,66 @@ def process_batch(dry_run: bool = False):
                         new_doc.close()
                     else:
                         print(f"⏩ Nota já existe no disco: '{isolated_filepath.name}'")
-                else:
-                    logging.info(f"🧪 [DRY-RUN] Isolação de nota simulada para: {isolated_filename}")
 
-                success = False
-                target_file_to_process = str(isolated_filepath) if not dry_run else str(pdf_path)
+                    if dry_run:
+                        logging.info(f"🧪 [DRY-RUN] Isolação de nota simulada para: {isolated_filename}")
 
-                if trade_type == "SWING":
-                    success = process_swing_pdf(target_file_to_process, dry_run=dry_run)
-                    if success:
-                        notas_swing += 1
-                        if not dry_run:
-                            try:
-                                from computeSwing import recalcular_swing
-                                from db_connection import get_session as get_db_session
-                                with get_db_session() as session_compute:
-                                    recalcular_swing(cpf=n_cliente, session=session_compute)
-                            except Exception as e:
-                                logging.error(f"Erro ao recalcular swing para CPF {n_cliente}: {e}")
-                            try:
-                                with Session(engine) as session:
-                                    n_nota_int = int(nr_nota) if nr_nota else 0
-                                    ops = session.exec(select(operacoesSwingtrade).where(
-                                        operacoesSwingtrade.nCliente == n_cliente,
-                                        operacoesSwingtrade.data == data_obj.date() if hasattr(data_obj, 'date') else None,
-                                        operacoesSwingtrade.nrNota == n_nota_int
-                                    )).all()
-                                    for op in ops:
-                                        ativos_negociados.add(op.nomeAtivo)
-                            except Exception as e:
-                                logging.error(f"Erro ao buscar ativos no banco: {e}")
-                else:
-                    success = process_day_pdf(target_file_to_process, dry_run=dry_run)
-                    if success:
-                        notas_day += 1
+                    success = False
+                    if trade_type == "SWING":
+                        success = process_swing_pdf(str(isolated_filepath), dry_run=dry_run)
+                        if success:
+                            notas_swing += 1
+                            if not dry_run:
+                                try:
+                                    with Session(engine) as session:
+                                        n_nota_int = int(nr_nota) if nr_nota else 0
+                                        data_param = data_obj.date() if (hasattr(data_obj, 'date') and callable(getattr(data_obj, 'date'))) else data_obj
+                                        
+                                        # Consulta as operações persistidas para recuperar os ativos e o CPF correto
+                                        ops = session.exec(select(operacoesSwingtrade).where(
+                                            operacoesSwingtrade.nCliente == n_cliente,
+                                            operacoesSwingtrade.data == data_param,
+                                            operacoesSwingtrade.nrNota == n_nota_int
+                                        )).all()
+                                        
+                                        cpf_real = None
+                                        for op in ops:
+                                            ativos_negociados.add(op.nomeAtivo)
+                                            if not cpf_real and op.cpf:
+                                                cpf_real = op.cpf
+                                        
+                                        if cpf_real:
+                                            try:
+                                                from computeSwing import recalcular_swing
+                                                from db_connection import get_session as get_db_session
+                                                with get_db_session() as session_compute:
+                                                    recalcular_swing(cpf=cpf_real, session=session_compute)
+                                            except Exception as e:
+                                                logging.error(f"Erro ao recalcular swing para CPF {cpf_real}: {e}")
+                                        else:
+                                            logging.warning(f"⚠️ CPF não encontrado nas operações registradas da nota {nr_nota} (nCliente: {n_cliente}). Recálculo de swing ignorado.")
+                                except Exception as e:
+                                    logging.error(f"Erro ao buscar operações no banco e recalcular swing: {e}")
+                    else:
+                        success = process_day_pdf(str(isolated_filepath), dry_run=dry_run)
+                        if success:
+                            notas_day += 1
 
-                if not success:
-                    all_success = False
+                    if not success:
+                        all_success = False
 
-                note_pages = []
+                    note_pages = []
 
-        doc_src.close()
+            doc_src.close()
 
-        if all_success and not dry_run:
-            try:
-                os.remove(pdf_path)
-                print(f"✅ Arquivo original apagado: {pdf_path}")
-            except Exception as e:
-                print(f"Erro ao apagar arquivo original {pdf_path}: {e}")
-        elif dry_run:
-            print(f"🧪 [DRY-RUN] O arquivo original NÃO foi alterado/removido: {pdf_path}")
+            if all_success and not dry_run:
+                try:
+                    os.remove(pdf_path)
+                    print(f"✅ Arquivo original apagado: {pdf_path}")
+                except Exception as e:
+                    print(f"Erro ao apagar arquivo original {pdf_path}: {e}")
+            elif dry_run:
+                print(f"🧪 [DRY-RUN] O arquivo original NÃO foi alterado/removido: {pdf_path}")
 
     print("\n" + "="*40)
     ativos_str = ", ".join(sorted(list(ativos_negociados))) if ativos_negociados else "Nenhum detectado"
