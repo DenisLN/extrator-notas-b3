@@ -11,7 +11,7 @@ import re
 from sqlmodel import Session, SQLModel, select
 from db_connection import engine, get_session
 from sqlalchemy.exc import IntegrityError
-from schemas import operacoesSwingtrade, registroNotasSwing
+from schemas import operacoesSwingtrade, registroNotasSwing, registroNomeAtivos
 from cleanupFunctions import cleanup_dict
 from assetMapper import resolve_asset_names_with_type
 from areaCodes import *
@@ -20,15 +20,38 @@ from areaCodes import *
 # nota que contenha algum deles não deve ser salva (ver process_swing_pdf).
 # O texto bruto extraído da coluna de ativo NÃO é o ticker puro: notas reais
 # mostram por ex. "INVESTO LFTB F11" (o "F" de lote fracionário fica colado
-# entre a raiz do ticker e o "11", às vezes com espaço em volta), então o
-# antigo `'LFTB11' in nome_ativo.upper()` nunca batia com esse formato.
+# entre a raiz do ticker e o "11", às vezes com espaço em volta).
+TICKERS_IGNORADOS = ('GOLD11', 'LFTB11', 'DEBB11')
+
+# Fallback só para nomes brutos que o mapeamento em registroNomeAtivos ainda
+# não conhece (ver get_nomes_brutos_ignorados_conhecidos). O antigo
+# `'LFTB11' in nome_ativo.upper()` nunca batia com o formato acima.
 ATIVOS_IGNORADOS_PATTERNS = [
     re.compile(re.escape(ativo[:-2]) + r'\s*F?\s*' + re.escape(ativo[-2:]))
-    for ativo in ('GOLD11', 'LFTB11', 'DEBB11')
+    for ativo in TICKERS_IGNORADOS
 ]
 
 
-def is_ativo_ignorado(nome_ativo: str) -> bool:
+def get_nomes_brutos_ignorados_conhecidos() -> set[str]:
+    """Consulta registroNomeAtivos -- a mesma tabela que assetMapper.py usa
+    para resolver nome bruto do PDF -> ticker canônico -- e retorna todo
+    nome bruto (nomeAtivo) já mapeado para um dos tickers ignorados. É a
+    fonte mais confiável, pois reflete exatamente as variações de texto já
+    vistas e resolvidas (manualmente ou por heurística) no passado."""
+    try:
+        with get_session() as session:
+            stmt = select(registroNomeAtivos.nomeAtivo).where(
+                registroNomeAtivos.nomeFantasia.in_(TICKERS_IGNORADOS)
+            )
+            return set(session.exec(stmt).all())
+    except Exception as e:
+        logging.warning(f"Não foi possível consultar registroNomeAtivos para a lista de exclusão: {e}")
+        return set()
+
+
+def is_ativo_ignorado(nome_ativo: str, nomes_brutos_conhecidos: set[str] = frozenset()) -> bool:
+    if nome_ativo in nomes_brutos_conhecidos:
+        return True
     nome_upper = nome_ativo.upper()
     return any(pattern.search(nome_upper) for pattern in ATIVOS_IGNORADOS_PATTERNS)
 
@@ -351,6 +374,8 @@ def process_swing_pdf(pdf_path: str, external_session: Session = None, dry_run: 
 
     logging.info(f"Processando Swing Trade PDF: {pdf_path} (Hash: {file_hash})")
 
+    nomes_brutos_ignorados_conhecidos = get_nomes_brutos_ignorados_conhecidos()
+
     doc_pymu = pymu.open(pdf_path)
     start_page = doc_pymu[0]
 
@@ -508,7 +533,7 @@ def process_swing_pdf(pdf_path: str, external_session: Session = None, dry_run: 
                         logging.warning(f"Erro ao acessar colunas na linha {row}: {e}")
                         continue
 
-                    if is_ativo_ignorado(nome_ativo):
+                    if is_ativo_ignorado(nome_ativo, nomes_brutos_ignorados_conhecidos):
                         logging.info(f"Ativo {nome_ativo} ignorado conforme regra.")
                         nota_tem_ativo_ignorado = True
                         continue
@@ -609,7 +634,7 @@ def process_swing_pdf(pdf_path: str, external_session: Session = None, dry_run: 
                             logging.warning(f"Erro ao acessar colunas na linha {row}: {e}")
                             continue
 
-                        if is_ativo_ignorado(nome_ativo):
+                        if is_ativo_ignorado(nome_ativo, nomes_brutos_ignorados_conhecidos):
                             logging.info(f"Ativo {nome_ativo} ignorado conforme regra.")
                             nota_tem_ativo_ignorado = True
                             continue
