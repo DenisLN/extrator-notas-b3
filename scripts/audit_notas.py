@@ -11,7 +11,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import xxhash
 from sqlmodel import select
 
-from process_notas import OUTPUT_DIR
+from process_notas import OUTPUT_DIR, backup_database
 from db_connection import get_session
 from schemas import notasDaytrade, registroNotasSwing
 from extractDay import process_day_pdf
@@ -112,6 +112,30 @@ def process_realmente_ausentes(realmente_ausentes: list[tuple[Path, str]], apply
     return results
 
 
+def update_mismatched_hashes(ja_no_banco: list[tuple[Path, str, str]]) -> list[tuple[Path, str, str]]:
+    """Atualiza hashNota, na linha já existente, para o hash atual do arquivo em
+    disco. Usado quando o arquivo mudou de conteúdo depois de já ter sido
+    processado (mesmo nrNota/data/nCliente), e não vale a pena reprocessar a
+    nota inteira só por causa disso."""
+    updated = []
+    with get_session() as session:
+        for pdf_path, trade_type, old_hash in ja_no_banco:
+            parsed = parse_isolated_filename(pdf_path)
+            if not parsed:
+                continue
+            _, data_obj, nr_nota, n_cliente = parsed
+            existing = find_existing_record(session, trade_type, data_obj, nr_nota, n_cliente)
+            if not existing:
+                print(f"⚠️  Registro não encontrado mais para '{pdf_path}', pulando.")
+                continue
+            new_hash = compute_hash(pdf_path)
+            existing.hashNota = new_hash
+            session.add(existing)
+            session.commit()
+            updated.append((pdf_path, old_hash, new_hash))
+    return updated
+
+
 def move_file(pdf_path: Path, base_dir: Path, subfolder: str) -> Path | None:
     dest_dir = base_dir / subfolder
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -143,10 +167,18 @@ def main():
              "'ja_no_banco_hash_divergente/' para as que já existem no banco com hash diferente, "
              "e 'processadas_agora/' para as que foram gravadas de verdade nesta execução (requer --apply)."
     )
+    parser.add_argument(
+        "--update-hashes", action="store_true",
+        help="Para as notas JÁ EXISTENTES no banco com hash divergente, atualiza o hashNota "
+             "gravado para o hash atual do arquivo em disco (sem reprocessar a nota). "
+             "Faz backup do banco antes de gravar."
+    )
     args = parser.parse_args()
     if args.apply:
         args.recheck = True
     if args.move_to:
+        args.recheck = True
+    if args.update_hashes:
         args.recheck = True
 
     if not OUTPUT_DIR.exists():
@@ -206,11 +238,24 @@ def main():
             for pdf_path, trade_type, hash_no_banco in ja_no_banco:
                 print(f"  - [{trade_type}] {pdf_path} (hash no banco: {hash_no_banco})")
                 f_out.write(f"{pdf_path} | hash_no_banco={hash_no_banco}\n")
-                if move_base:
-                    dest = move_file(pdf_path, move_base, "ja_no_banco_hash_divergente")
-                    if dest:
-                        print(f"    ↳ movida para '{dest}'")
         print(f"\n📝 Lista gravada em '{REPORT_FILE_HASH_DIVERGENTE}'.")
+
+        if args.update_hashes:
+            print(f"\n🔧 Atualizando hashNota de {len(ja_no_banco)} nota(s) para o hash atual do arquivo...")
+            print("Criando snapshot do banco antes de gravar...")
+            if not backup_database():
+                print("⚠️  Backup falhou. Abortando atualização de hashes por segurança.")
+            else:
+                updated = update_mismatched_hashes(ja_no_banco)
+                for pdf_path, old_hash, new_hash in updated:
+                    print(f"  ✅ {pdf_path}\n     hashNota: {old_hash} -> {new_hash}")
+                print(f"\n{len(updated)} de {len(ja_no_banco)} nota(s) atualizadas com sucesso.")
+
+        if move_base:
+            for pdf_path, trade_type, hash_no_banco in ja_no_banco:
+                dest = move_file(pdf_path, move_base, "ja_no_banco_hash_divergente")
+                if dest:
+                    print(f"    ↳ movida para '{dest}'")
 
     if nao_reconhecidas:
         print(f"\n❓ {len(nao_reconhecidas)} arquivo(s) com nome fora do padrão de isolamento "
