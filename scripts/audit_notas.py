@@ -266,6 +266,11 @@ def main():
     if realmente_ausentes:
         modo = "GRAVANDO DE VERDADE (--apply)" if args.apply else "SIMULAÇÃO (dry-run, use --apply para gravar de verdade)"
         print(f"\n🆕 {len(realmente_ausentes)} nota(s) realmente ausentes -- processando em modo {modo}:\n")
+        if move_base and not args.apply:
+            print(f"ℹ️  --move-to foi passado, mas SEM --apply nada é gravado no banco, então nenhum "
+                  f"arquivo destas {len(realmente_ausentes)} nota(s) será movido (mover um arquivo que "
+                  f"ainda não está no banco arriscaria perdê-lo de vista). Rode de novo com --apply "
+                  f"--move-to para gravar e mover de verdade.\n")
         results = process_realmente_ausentes(realmente_ausentes, apply=args.apply)
         for pdf_path, trade_type, success in results:
             status = "✅ OK" if success else "❌ FALHOU"
@@ -274,6 +279,9 @@ def main():
                 dest = move_file(pdf_path, move_base, "processadas_agora")
                 if dest:
                     print(f"    ↳ movida para '{dest}'")
+    elif move_base:
+        print(f"\nℹ️  Nenhuma nota 'já no banco (hash divergente)' ou 'realmente ausente' para mover "
+              f"para '{move_base}' nesta execução.")
 
 
 if __name__ == "__main__":
