@@ -146,6 +146,8 @@ def main():
     args = parser.parse_args()
     if args.apply:
         args.recheck = True
+    if args.move_to:
+        args.recheck = True
 
     if not OUTPUT_DIR.exists():
         print(f"Diretório de saída '{OUTPUT_DIR}' não encontrado.")
