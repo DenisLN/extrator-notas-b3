@@ -16,6 +16,22 @@ from cleanupFunctions import cleanup_dict
 from assetMapper import resolve_asset_names_with_type
 from areaCodes import *
 
+# Ativos que o usuário sempre compra isoladamente de todos os outros -- uma
+# nota que contenha algum deles não deve ser salva (ver process_swing_pdf).
+# O texto bruto extraído da coluna de ativo NÃO é o ticker puro: notas reais
+# mostram por ex. "INVESTO LFTB F11" (o "F" de lote fracionário fica colado
+# entre a raiz do ticker e o "11", às vezes com espaço em volta), então o
+# antigo `'LFTB11' in nome_ativo.upper()` nunca batia com esse formato.
+ATIVOS_IGNORADOS_PATTERNS = [
+    re.compile(re.escape(ativo[:-2]) + r'\s*F?\s*' + re.escape(ativo[-2:]))
+    for ativo in ('GOLD11', 'LFTB11', 'DEBB11')
+]
+
+
+def is_ativo_ignorado(nome_ativo: str) -> bool:
+    nome_upper = nome_ativo.upper()
+    return any(pattern.search(nome_upper) for pattern in ATIVOS_IGNORADOS_PATTERNS)
+
 
 def calcular_irrf_por_tipo(vendas_por_tipo: dict[str, Decimal]) -> dict[str, Decimal]:
     """
@@ -492,8 +508,7 @@ def process_swing_pdf(pdf_path: str, external_session: Session = None, dry_run: 
                         logging.warning(f"Erro ao acessar colunas na linha {row}: {e}")
                         continue
 
-                    ativos_ignorados = ['GOLD11', 'LFTB11', 'DEBB11']
-                    if any(ignorado in nome_ativo.upper() for ignorado in ativos_ignorados):
+                    if is_ativo_ignorado(nome_ativo):
                         logging.info(f"Ativo {nome_ativo} ignorado conforme regra.")
                         nota_tem_ativo_ignorado = True
                         continue
@@ -594,8 +609,7 @@ def process_swing_pdf(pdf_path: str, external_session: Session = None, dry_run: 
                             logging.warning(f"Erro ao acessar colunas na linha {row}: {e}")
                             continue
 
-                        ativos_ignorados = ['GOLD11', 'LFTB11', 'DEBB11']
-                        if any(ignorado in nome_ativo.upper() for ignorado in ativos_ignorados):
+                        if is_ativo_ignorado(nome_ativo):
                             logging.info(f"Ativo {nome_ativo} ignorado conforme regra.")
                             nota_tem_ativo_ignorado = True
                             continue
