@@ -3,6 +3,7 @@ from datetime import date
 from decimal import Decimal
 import logging
 import math
+import os
 import fitz as pymu
 import pdfplumber as pdfpu
 import xxhash
@@ -378,6 +379,7 @@ def process_swing_pdf(pdf_path: str, external_session: Session = None, dry_run: 
 
     aggregated_trades = {}
     ativos_negociados = {}
+    nota_tem_ativo_ignorado = False
     last_header = {}
     summary_data = {
         'taxas': Decimal('0.00'),
@@ -493,6 +495,7 @@ def process_swing_pdf(pdf_path: str, external_session: Session = None, dry_run: 
                     ativos_ignorados = ['GOLD11', 'LFTB11', 'DEBB11']
                     if any(ignorado in nome_ativo.upper() for ignorado in ativos_ignorados):
                         logging.info(f"Ativo {nome_ativo} ignorado conforme regra.")
+                        nota_tem_ativo_ignorado = True
                         continue
 
                     logging.debug(f"Página {page_idx}: Linha lida -> row={row}")
@@ -594,6 +597,7 @@ def process_swing_pdf(pdf_path: str, external_session: Session = None, dry_run: 
                         ativos_ignorados = ['GOLD11', 'LFTB11', 'DEBB11']
                         if any(ignorado in nome_ativo.upper() for ignorado in ativos_ignorados):
                             logging.info(f"Ativo {nome_ativo} ignorado conforme regra.")
+                            nota_tem_ativo_ignorado = True
                             continue
 
                         logging.debug(f"Página {page_idx}: Linha lida -> row={row}")
@@ -724,6 +728,29 @@ def process_swing_pdf(pdf_path: str, external_session: Session = None, dry_run: 
                 has_venda = any(t['operacaoTipo'] == 'V' for t in aggregated_trades.values())
                 if has_venda and total_irrf == Decimal('0.00'):
                     logging.info(f"ℹ️ Nota com venda e sem IRRF debitado na nota. {pdf_path}")
+
+    if nota_tem_ativo_ignorado:
+        if aggregated_trades:
+            logging.error(
+                f"🚨 ERRO CRÍTICO: Nota mistura ativo(s) da lista de exclusão (GOLD11/LFTB11/DEBB11) com "
+                f"outro(s) ativo(s) normal(is) -- comportamento inesperado, pois esses ativos deveriam ser "
+                f"comprados isoladamente. Abortando! {pdf_path}"
+            )
+            with open("notas_ativo_ignorado_misto.txt", "a", encoding="utf-8") as f_out:
+                f_out.write(f"{pdf_path}\n")
+            return False
+
+        logging.info(f"Nota contém apenas ativo(s) da lista de exclusão (GOLD11/LFTB11/DEBB11); ignorando nota inteira, nada será salvo. {pdf_path}")
+        if dry_run:
+            logging.info(f"🧪 [DRY-RUN] Arquivo isolado NÃO removido (simulação): {pdf_path}")
+        else:
+            try:
+                doc_pymu.close()
+                os.remove(pdf_path)
+                logging.info(f"Arquivo isolado removido (nota apenas com ativo(s) ignorado(s)): {pdf_path}")
+            except Exception as e:
+                logging.error(f"Erro ao remover arquivo isolado ignorado {pdf_path}: {e}")
+        return True
 
     # Validação do Lock
     if summary_data['taxas'] == Decimal('0.00') and summary_data['liquidoReal'] == Decimal('0.00') and summary_data['liquidoCalc'] == Decimal('0.00'):
