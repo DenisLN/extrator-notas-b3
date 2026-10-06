@@ -111,7 +111,7 @@ def backup_database():
         return False
 
 def process_batch(dry_run: bool = False):
-    logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
     if not INPUT_DIR.exists():
         print(f"Diretório de entrada '{INPUT_DIR}' não encontrado.")
