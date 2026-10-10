@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import yaml
 import logging
 import threading
@@ -160,6 +161,15 @@ def resolve_asset_names(session: Session, asset_names: list[str]) -> dict[str, s
 
                 with open(YAML_PATH, "w", encoding="utf-8") as f:
                     yaml.dump(yaml_content, f, allow_unicode=True, default_flow_style=False)
+
+                if sys.stdin is None or not sys.stdin.isatty():
+                    # Rodando sem terminal (ex.: chamado pelo coletor de e-mails/systemd):
+                    # input() levantaria EOFError e derrubaria o lote inteiro. Pausa só
+                    # esta nota -- process_swing_pdf trata o None ("Execução pausada") e
+                    # process_notas.py sai com código 2.
+                    logging.error(f"{len(missing)} ativo(s) sem ticker conhecido: {missing}. "
+                                  f"Preencha '{os.path.abspath(YAML_PATH)}' e rode de novo.")
+                    return None
 
                 input(f"\n[AÇÃO NECESSÁRIA] {len(missing)} ativo(s) pendentes: {missing}. Preencha-os no '{YAML_PATH}', salve o arquivo e pressione ENTER aqui no terminal para continuar...")
                 
