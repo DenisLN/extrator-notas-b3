@@ -13,11 +13,12 @@ frontend/db_connection.py
 *.pdf
 *.txt
 
-# Pasta scripts, exceto testAreas.py, setup_env.py e audit_notas.py
+# Pasta scripts, exceto testAreas.py, setup_env.py, audit_notas.py e daytrade_detalhe.py
 scripts/*
 !scripts/testAreas.py
 !scripts/setup_env.py
 !scripts/audit_notas.py
+!scripts/daytrade_detalhe.py
 
 # Streamlit secrets
 .streamlit/secrets.toml

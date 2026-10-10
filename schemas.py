@@ -25,7 +25,38 @@ class notasDaytrade(SQLModel, table=True):
     hashNota: str = Field(index=True, nullable=False)
     relativePath: str
 
-class operacoesSwingtrade(SQLModel, table=True): 
+class operacoesDaytradeDetalhe(SQLModel, table=True):
+    """Uma linha por operação da tabela de negócios de uma nota de Day Trade
+    (BM&F), ligada à nota em notasDaytrade. Extraída por extractDayDetalhe.py.
+
+    ATENÇÃO: só registro. Nenhum cálculo usa esta tabela (ver NOTICE.md).
+    Reprocessar a nota substitui as linhas dela (idempotente)."""
+    __tablename__ = "operacoesdaytrade_detalhe"
+    __table_args__ = (UniqueConstraint("notaDaytradeId",
+                                       "ordem",
+                                       name="detalhe_daytrade_ordem"),
+                      )
+
+    id: int | None = Field(default=None, primary_key=True)
+    notaDaytradeId: int = Field(foreign_key="notasdaytrade.id", index=True)
+    hashNota: str                             # xxhash64 do PDF isolado lido
+    corretora: str
+    data: date = Field(index=True)            # data do pregão (da nota)
+    nrNota: int
+    pagina: int                               # página do PDF isolado, a partir de 1
+    ordem: int                                # posição da operação na nota, a partir de 1
+    operacaoTipo: str                         # 'C' ou 'V' (coluna C/V)
+    mercadoria: str                           # ex. 'WINV26' (espaços tirados: a XP escreve 'WIN V26')
+    vencimento: date | None = Field(default=None)
+    quantidade: int                           # pode ser negativa (AJUPOS)
+    precoAjuste: Decimal = Field(max_digits=18, decimal_places=4)
+    tipoNegocio: str                          # 'DAY TRADE'; também 'NORMAL', 'AJUPOS', 'TX. PERMANÊNCIA'
+    valorOperacao: Decimal = Field(max_digits=14, decimal_places=2)  # sem sinal; o sinal está em debitoCredito
+    debitoCredito: str | None = Field(default=None)  # 'D' ou 'C'; vazio quando o valor é 0,00
+    taxaOperacional: Decimal = Field(max_digits=12, decimal_places=2)
+    marcadores: str | None = Field(default=None)  # símbolos de rodapé colados aos campos, ex. '@' (XP: corretora/pessoa vinculada na contraparte)
+
+class operacoesSwingtrade(SQLModel, table=True):
     __table_args__ = (UniqueConstraint("corretora",
                                        "cpf",
                                        "data",

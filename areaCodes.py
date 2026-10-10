@@ -21,7 +21,22 @@ areaDict_xp_day = {
 	'nCliente': Rect(479, 152, 516, 160),
 }
 
-brokerName_day = { 
+# Tabela de operações das notas de Day Trade (BM&F), lida por extractDayDetalhe.py.
+# Coordenadas (x0, top, x1, bottom) em pontos, origem no canto superior
+# esquerdo -- a convenção do pdfplumber, que é também a do Rect/clip do
+# PyMuPDF (as notas têm mediabox em (0, 0) e rotação 0, então as duas
+# coincidem e não há conversão). A região inclui a linha de cabeçalho da
+# tabela (C/V, Mercadoria, ...), usada para achar as colunas. O resultado
+# NÃO entra em nenhum cálculo (ver NOTICE.md).
+areaDict_btg_day_operacoes = {
+	'tableAreaOperacoes': Rect(23, 179, 567, 603),
+}
+
+areaDict_xp_day_operacoes = {
+	'tableAreaOperacoes': Rect(32, 183, 566, 633),
+}
+
+brokerName_day = {
 	'coords_xp': Rect(33, 77, 277, 93),
 	'coords_btg': Rect(26, 75, 119, 84),
 }

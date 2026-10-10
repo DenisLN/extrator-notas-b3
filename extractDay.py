@@ -9,6 +9,7 @@ from areaCodes import areaDict_btg_day, areaDict_xp_day, brokerName_day
 from schemas import * 
 from cleanupFunctions import cleanup_dict
 from db_connection import engine, get_session
+import extractDayDetalhe
 
 SQLModel.metadata.create_all(engine)
 
@@ -23,7 +24,14 @@ def handle_files(directory, dry_run: bool = False):
             exit()
 
 
-def process_day_pdf(pdf_path: str, external_session: Session = None, dry_run: bool = False) -> bool:
+def process_day_pdf(pdf_path: str, external_session: Session = None, dry_run: bool = False,
+                    falhas_detalhe: list | None = None) -> bool:
+    """Lê os totais da nota de Day Trade para notasDaytrade e, à parte, as
+    operações da nota para operacoesdaytrade_detalhe (extractDayDetalhe.py).
+
+    O retorno (True/False) só diz respeito a notasDaytrade. Uma falha no
+    detalhe por operação não muda o retorno: vai para o log como ERROR e,
+    se falhas_detalhe for uma lista, é acrescentada a ela."""
     logging.debug(f"Iniciando leitura do PDF: {pdf_path}")
     with open(pdf_path, "rb") as f:
         file_hash = xxhash.xxh64(f.read()).hexdigest()
@@ -56,6 +64,8 @@ def process_day_pdf(pdf_path: str, external_session: Session = None, dry_run: bo
 
     i = 0
     linhas = [] 
+    paginas_por_linha = []  # páginas (0-based) de cada nota, para o detalhe por operação
+    inicio_nota = 0
     while i < doc_len: 
         page = doc[i]
         bloco_liquido = page.get_textbox(coordmap['liquido'])
@@ -105,6 +115,8 @@ def process_day_pdf(pdf_path: str, external_session: Session = None, dry_run: bo
                 return False
                 
             linhas.append(linha)
+            paginas_por_linha.append(list(range(inicio_nota, i + 1)))
+            inicio_nota = i + 1
             i += 1
 
     # Conversão de dicts para modelos SQLModel
@@ -149,12 +161,42 @@ def process_day_pdf(pdf_path: str, external_session: Session = None, dry_run: bo
                 return False
         return True
 
+    def processar_detalhe(session: Session) -> None:
+        """Operações por nota -> operacoesdaytrade_detalhe (só registro, ver
+        NOTICE.md). Nunca muda o retorno de process_day_pdf."""
+        for idx, linha in enumerate(linhas):
+            contexto = f"Day Trade {pdf_path} (nota nº {linha.get('nrNota')}, páginas {paginas_por_linha[idx][0] + 1}-{paginas_por_linha[idx][-1] + 1})"
+            try:
+                operacoes, conf = extractDayDetalhe.extrair_nota(doc, broker, paginas_por_linha[idx])
+                if dry_run:
+                    logging.info(f"🧪 [DRY-RUN] {contexto}: {conf['operacoes']} operação(ões) lidas; "
+                                 f"soma {conf['soma_operacoes']} = valor dos negócios {conf['valor_negocios']}. Nada gravado.")
+                    continue
+                nota = extractDayDetalhe.nota_registrada(session, linha)
+                if nota is None:
+                    raise extractDayDetalhe.ErroDetalheDaytrade("nota não encontrada em notasDaytrade para ligar as operações")
+                extractDayDetalhe.gravar_detalhe(session, nota, operacoes, file_hash)
+                logging.info(f"{contexto}: {conf['operacoes']} operação(ões) gravadas em operacoesdaytrade_detalhe "
+                             f"(soma {conf['soma_operacoes']} = valor dos negócios {conf['valor_negocios']}).")
+            except Exception as e:
+                logging.error(f"❌ {contexto}: detalhe por operação NÃO gravado: {type(e).__name__}: {e}")
+                if not isinstance(e, extractDayDetalhe.ErroDetalheDaytrade):
+                    logging.debug("Traceback do detalhe por operação:", exc_info=True)
+                if falhas_detalhe is not None:
+                    falhas_detalhe.append(f"{contexto}: {e}")
+
+    def persistir(session: Session) -> bool:
+        ok = execute_persistence(session)
+        if ok:
+            processar_detalhe(session)
+        return ok
+
     try:
         if external_session:
-            return execute_persistence(external_session)
+            return persistir(external_session)
         else:
             with get_session() as session:
-                return execute_persistence(session)
+                return persistir(session)
     finally:
         doc.close()
 
