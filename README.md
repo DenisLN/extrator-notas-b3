@@ -29,6 +29,7 @@ Extrai, estrutura e visualiza operações de **Day Trade** e **Swing Trade** a p
 notascorretagem/
 ├── areaCodes.py          # Coordenadas de extração por corretora
 ├── extractDay.py         # Parser de notas Day Trade
+├── extractDayDetalhe.py  # Day Trade por operação (só registro, ver NOTICE.md)
 ├── extractSwing.py       # Parser de notas Swing Trade
 ├── process_notas.py      # Orquestrador do pipeline de extração
 ├── processEvents.py      # Processamento de eventos corporativos
@@ -144,6 +145,53 @@ Coloque os PDFs das notas de corretagem na pasta `notas/` e execute o pipeline d
 > **💡 Mapeamento de Ativos (Swing Trade):** 
 > Em notas de Swing Trade, algumas corretoras descrevem apenas o nome da empresa (ex: `PRIO ON NM`) sem o código da ação (`PRIO3`). O extrator possui heurísticas (ex: se a nota disser `FII BTLG BTLG11`, ele detecta `BTLG11`), mas quando não consegue identificar o ativo de forma segura, a extração é pausada e um arquivo chamado `missing_assets.yaml` é gerado.
 > Quando isso acontecer, basta abrir este arquivo, preencher o ticker correto do ativo que faltou, e rodar a extração novamente para o sistema registrar na base de dados!
+
+### Quem alimenta a entrada
+
+No servidor, quem põe PDFs em `notas/` (o `INPUT_DIR`) é o **coletor de e-mails
+do painel** (`/mnt/Projetos/painel/coletor_emails`, timer `coletor-emails.timer`,
+diário às 21:00). Para cada e-mail de nota de negociação ele tira a senha do
+PDF, grava o PDF **já sem senha** em `notas/` e, no fim da rodada, roda
+`python process_notas.py` neste diretório (é daqui que vem o `.env`). As
+últimas 30 linhas da saída e o código de saída vão para
+`journalctl --user -u coletor-emails`.
+
+Por isso o extrator **não precisa de cron próprio**. Rodá-lo à mão continua
+valendo (a trava abaixo evita choque com o coletor).
+
+Toda a saída vai para o stdout, com uma linha por etapa de cada nota e um
+**resumo no fim** (processadas, já existentes, falhas e o motivo de cada uma),
+de modo que as 30 últimas linhas guardadas pelo coletor contenham o resumo.
+`-v` liga o nível DEBUG.
+
+### Códigos de saída
+
+| Código | Significado |
+|---|---|
+| `0` | Tudo certo (ou nada a processar). |
+| `1` | Alguma falha: nota com erro (ou gravada, mas com ERROR no log, ex. operação duplicada não gravada), PDF ilegível/com senha, `pg_dump` falhou (nada é processado sem o snapshot), recálculo do swing falhou, detalhe de day trade não conferiu, ou erro inesperado. O PDF original de uma nota que falhou fica em `notas/` e é tentado de novo na próxima execução. |
+| `2` | Nenhuma falha, mas alguma nota de swing ficou **pausada** esperando `missing_assets.yaml` (ativo sem ticker). Preencha o arquivo e rode de novo. Sem terminal (coletor/systemd) a nota é pausada em vez de esperar o ENTER. |
+| `3` | Outra execução já está rodando (trava ocupada); nada foi feito. |
+
+Uma nota ruim não derruba o lote: o erro vai para o log com o arquivo, a nota
+e a etapa, e as outras notas seguem. "Nota já registrada" (reenvio da
+corretora, reprocessamento) não é falha: nada é duplicado e o original é
+apagado.
+
+### Trava
+
+No começo, o `process_notas.py` pega uma trava exclusiva (`fcntl.flock`; no
+Windows, `msvcrt.locking`) no arquivo `notas/.processando`. Uma segunda
+execução ao mesmo tempo (ex.: à mão enquanto o coletor roda) sai na hora com a
+mensagem "Outra execução do process_notas.py já está em andamento" e o código
+`3`. O arquivo `.processando` fica no diretório de propósito; não apague.
+`--restore`/`--restore-last` não pegam a trava.
+
+### Day trade por operação (só registro)
+
+Além dos totais da nota, as operações de cada nota de day trade (XP e BTG) são
+gravadas em `operacoesdaytrade_detalhe`. **Não são usadas em nenhum cálculo.**
+Veja [NOTICE.md](NOTICE.md).
 
 ### 6. Interface visual
 
