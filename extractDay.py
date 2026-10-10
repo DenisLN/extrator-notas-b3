@@ -117,8 +117,11 @@ def process_day_pdf(pdf_path: str, external_session: Session = None, dry_run: bo
             payload = obj.model_dump() if hasattr(obj, "model_dump") else obj.__dict__
             logging.debug(f"Objeto notasDaytrade [{idx}] montado com sucesso: {payload}")
         except Exception as err:
-            logging.error(f"Erro ao instanciar notasDaytrade para a linha {idx}: {err}")
+            logging.error(f"❌ Day Trade {pdf_path}: dados da nota inválidos para notasDaytrade "
+                          f"(nota {idx + 1} do arquivo): {err}")
             logging.debug(f"Conteúdo da linha com falha: {d}")
+            doc.close()
+            return False
 
     def execute_persistence(session: Session) -> bool:
         if dry_run:
@@ -134,13 +137,15 @@ def process_day_pdf(pdf_path: str, external_session: Session = None, dry_run: bo
                 session.add(dado)
                 session.commit()
                 payload = dado.model_dump() if hasattr(dado, "model_dump") else dado.__dict__
-                logging.info(f"✅ Dado persistido no banco: {payload}")
+                logging.info(f"✅ Nota day trade nº {dado.nrNota} ({dado.data}) gravada em notasDaytrade.")
+                logging.debug(f"Dado persistido no banco: {payload}")
             except IntegrityError: 
                 session.rollback()
-                logging.warning(f"⚠️ Dado duplicado retido por constraint: nrNota/hashNota")
+                logging.info(f"Nota day trade nº {dado.nrNota} ({dado.data}) já estava em notasDaytrade "
+                             f"(mesma corretora/CPF/data/conta): nada gravado.")
             except Exception as e: 
                 session.rollback()
-                logging.error(f"❌ Erro ao gravar no banco: {e}") 
+                logging.error(f"❌ Day Trade {pdf_path}: erro ao gravar em notasDaytrade: {e}") 
                 return False
         return True
 

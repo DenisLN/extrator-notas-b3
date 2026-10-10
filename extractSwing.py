@@ -862,16 +862,23 @@ def process_swing_pdf(pdf_path: str, external_session: Session = None, dry_run: 
             ativosNegociados={mapped_names.get(k, {}).get('nomeFantasia', k): v for k, v in ativos_negociados.items()},
             relativePath=rel_path,
         )
+        # Falha de gravação que não seja "já registrada" faz a nota falhar
+        # (o PDF original fica na entrada para nova tentativa); antes ela só
+        # ia para o log e a nota contava como sucesso.
+        falha_gravacao = False
+        nota_ja_registrada = False
         try:
             session.add(nota_reg)
             session.commit()
             logging.info(f"Nota nº {last_header.get('nrNota')} gravada em registroNotasSwing.")
         except IntegrityError:
             session.rollback()
-            logging.error("Nota duplicada em registroNotasSwing.")
+            nota_ja_registrada = True
+            logging.info(f"Nota nº {last_header.get('nrNota')} já estava em registroNotasSwing: nada gravado.")
         except Exception as e:
             session.rollback()
-            logging.error(f"Erro ao salvar nota em registroNotasSwing: {e}")
+            falha_gravacao = True
+            logging.error(f"❌ Erro ao salvar nota nº {last_header.get('nrNota')} em registroNotasSwing ({pdf_path}): {e}")
 
         vol_total_nota = sum(t['totalValor'] for t in aggregated_trades.values())
 
@@ -911,12 +918,21 @@ def process_swing_pdf(pdf_path: str, external_session: Session = None, dry_run: 
                 session.commit()
             except IntegrityError:
                 session.rollback()
-                logging.error("Operação duplicada (UniqueConstraint violada)")
+                if nota_ja_registrada:
+                    logging.debug(f"Operação {nome_fantasia} {trade['operacaoTipo']} já registrada (nota já estava no banco).")
+                else:
+                    # Comportamento mantido (a nota segue como gravada), mas não
+                    # em silêncio: dois nomes brutos que viram o mesmo ticker na
+                    # mesma nota colidem na UniqueConstraint e a 2ª operação NÃO
+                    # é gravada. process_notas.py conta este ERROR e sai com 1.
+                    logging.error(f"❌ Operação {nome_fantasia} {trade['operacaoTipo']} da nota nº {trade['nrNota']} "
+                                  f"NÃO gravada: duplicada (UniqueConstraint violada) numa nota nova -- confira: {pdf_path}")
             except Exception as e:
                 session.rollback()
-                logging.error(f"Erro ao salvar operação: {e}")
+                falha_gravacao = True
+                logging.error(f"❌ Erro ao salvar operação {nome_fantasia} da nota nº {trade['nrNota']} ({pdf_path}): {e}")
 
-        return True
+        return not falha_gravacao
 
     try:
         if external_session:
