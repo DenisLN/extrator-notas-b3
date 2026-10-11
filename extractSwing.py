@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from schemas import operacoesSwingtrade, registroNotasSwing, registroNomeAtivos
 from cleanupFunctions import cleanup_dict
 from assetMapper import resolve_asset_names_with_type
+from travaBanco import regiao_critica
 from areaCodes import *
 
 # Ativos que o usuário sempre compra isoladamente de todos os outros -- uma
@@ -368,7 +369,13 @@ logging.getLogger("pdfminer").setLevel(logging.WARNING)
 SQLModel.metadata.create_all(engine)
 
 
-def process_swing_pdf(pdf_path: str, external_session: Session = None, dry_run: bool = False) -> bool:
+def process_swing_pdf(pdf_path: str, external_session: Session = None, dry_run: bool = False,
+                      resultado: dict | None = None) -> bool:
+    """Lê a nota de swing e grava a nota e as operações numa transação só,
+    dentro da região crítica do banco (travaBanco.py).
+
+    Se resultado for um dict, recebe 'ja_registrada' (bool) quando a
+    gravação chega a ser tentada."""
     with open(pdf_path, "rb") as f:
         file_hash = xxhash.xxh64(f.read()).hexdigest()
 
@@ -862,23 +869,24 @@ def process_swing_pdf(pdf_path: str, external_session: Session = None, dry_run: 
             ativosNegociados={mapped_names.get(k, {}).get('nomeFantasia', k): v for k, v in ativos_negociados.items()},
             relativePath=rel_path,
         )
-        # Falha de gravação que não seja "já registrada" faz a nota falhar
-        # (o PDF original fica na entrada para nova tentativa); antes ela só
-        # ia para o log e a nota contava como sucesso.
+        # Nota e operações vão numa transação só: cada linha num savepoint (uma
+        # linha duplicada não desfaz as outras) e um commit no fim. Se algo
+        # falhar, nada da nota fica gravado e o PDF original fica na entrada
+        # para nova tentativa. Antes cada linha tinha o seu commit, e uma
+        # falha no meio deixava a nota pela metade.
         falha_gravacao = False
         nota_ja_registrada = False
         try:
-            session.add(nota_reg)
-            session.commit()
-            logging.info(f"Nota nº {last_header.get('nrNota')} gravada em registroNotasSwing.")
+            with session.begin_nested():
+                session.add(nota_reg)
         except IntegrityError:
-            session.rollback()
             nota_ja_registrada = True
             logging.info(f"Nota nº {last_header.get('nrNota')} já estava em registroNotasSwing: nada gravado.")
         except Exception as e:
-            session.rollback()
             falha_gravacao = True
             logging.error(f"❌ Erro ao salvar nota nº {last_header.get('nrNota')} em registroNotasSwing ({pdf_path}): {e}")
+        if resultado is not None:
+            resultado['ja_registrada'] = nota_ja_registrada
 
         vol_total_nota = sum(t['totalValor'] for t in aggregated_trades.values())
 
@@ -914,10 +922,9 @@ def process_swing_pdf(pdf_path: str, external_session: Session = None, dry_run: 
                 taxaRateada=taxa_rateada.quantize(Decimal('0.0001')),
             )
             try:
-                session.add(op)
-                session.commit()
+                with session.begin_nested():
+                    session.add(op)
             except IntegrityError:
-                session.rollback()
                 if nota_ja_registrada:
                     logging.debug(f"Operação {nome_fantasia} {trade['operacaoTipo']} já registrada (nota já estava no banco).")
                 else:
@@ -928,18 +935,32 @@ def process_swing_pdf(pdf_path: str, external_session: Session = None, dry_run: 
                     logging.error(f"❌ Operação {nome_fantasia} {trade['operacaoTipo']} da nota nº {trade['nrNota']} "
                                   f"NÃO gravada: duplicada (UniqueConstraint violada) numa nota nova -- confira: {pdf_path}")
             except Exception as e:
-                session.rollback()
                 falha_gravacao = True
                 logging.error(f"❌ Erro ao salvar operação {nome_fantasia} da nota nº {trade['nrNota']} ({pdf_path}): {e}")
 
-        return not falha_gravacao
+        if falha_gravacao:
+            session.rollback()
+            logging.error(f"❌ Nota nº {last_header.get('nrNota')}: nada gravado (nota e operações desfeitas juntas).")
+            return False
+        try:
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            logging.error(f"❌ Erro ao confirmar a gravação da nota nº {last_header.get('nrNota')} ({pdf_path}): {e}")
+            return False
+        if not nota_ja_registrada:
+            logging.info(f"Nota nº {last_header.get('nrNota')} gravada em registroNotasSwing.")
+        return True
 
     try:
-        if external_session:
-            return execute_persistence(external_session)
-        else:
-            with get_session() as session:
-                return execute_persistence(session)
+        # A decisão (nota já existe? ativo já mapeado?) e a gravação ficam na
+        # mesma região crítica: dois processos com a mesma nota não se intercalam.
+        with regiao_critica(engine):
+            if external_session:
+                return execute_persistence(external_session)
+            else:
+                with get_session() as session:
+                    return execute_persistence(session)
     finally:
         doc_pymu.close()
 

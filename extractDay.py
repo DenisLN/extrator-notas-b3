@@ -10,6 +10,7 @@ from schemas import *
 from cleanupFunctions import cleanup_dict
 from db_connection import engine, get_session
 import extractDayDetalhe
+from travaBanco import regiao_critica
 
 SQLModel.metadata.create_all(engine)
 
@@ -25,13 +26,17 @@ def handle_files(directory, dry_run: bool = False):
 
 
 def process_day_pdf(pdf_path: str, external_session: Session = None, dry_run: bool = False,
-                    falhas_detalhe: list | None = None) -> bool:
+                    falhas_detalhe: list | None = None, resultado: dict | None = None) -> bool:
     """Lê os totais da nota de Day Trade para notasDaytrade e, à parte, as
     operações da nota para operacoesdaytrade_detalhe (extractDayDetalhe.py).
 
     O retorno (True/False) só diz respeito a notasDaytrade. Uma falha no
     detalhe por operação não muda o retorno: vai para o log como ERROR e,
-    se falhas_detalhe for uma lista, é acrescentada a ela."""
+    se falhas_detalhe for uma lista, é acrescentada a ela.
+
+    A gravação acontece dentro da região crítica do banco (travaBanco.py);
+    a leitura do PDF, fora. Se resultado for um dict, recebe 'ja_registrada'
+    (True se todas as notas do arquivo já estavam em notasDaytrade)."""
     logging.debug(f"Iniciando leitura do PDF: {pdf_path}")
     with open(pdf_path, "rb") as f:
         file_hash = xxhash.xxh64(f.read()).hexdigest()
@@ -144,6 +149,7 @@ def process_day_pdf(pdf_path: str, external_session: Session = None, dry_run: bo
             session.rollback()
             return True
 
+        ja_registradas = 0
         for dado in dados: 
             try:
                 session.add(dado)
@@ -153,13 +159,24 @@ def process_day_pdf(pdf_path: str, external_session: Session = None, dry_run: bo
                 logging.debug(f"Dado persistido no banco: {payload}")
             except IntegrityError: 
                 session.rollback()
+                ja_registradas += 1
                 logging.info(f"Nota day trade nº {dado.nrNota} ({dado.data}) já estava em notasDaytrade "
                              f"(mesma corretora/CPF/data/conta): nada gravado.")
             except Exception as e: 
                 session.rollback()
                 logging.error(f"❌ Day Trade {pdf_path}: erro ao gravar em notasDaytrade: {e}") 
                 return False
+        if resultado is not None:
+            resultado['ja_registrada'] = bool(dados) and ja_registradas == len(dados)
         return True
+
+    # Operações por nota, lidas do PDF antes da região crítica (é a parte lenta).
+    detalhes = []
+    for idx, linha in enumerate(linhas):
+        try:
+            detalhes.append(extractDayDetalhe.extrair_nota(doc, broker, paginas_por_linha[idx]))
+        except Exception as e:
+            detalhes.append(e)
 
     def processar_detalhe(session: Session) -> None:
         """Operações por nota -> operacoesdaytrade_detalhe (só registro, ver
@@ -167,7 +184,9 @@ def process_day_pdf(pdf_path: str, external_session: Session = None, dry_run: bo
         for idx, linha in enumerate(linhas):
             contexto = f"Day Trade {pdf_path} (nota nº {linha.get('nrNota')}, páginas {paginas_por_linha[idx][0] + 1}-{paginas_por_linha[idx][-1] + 1})"
             try:
-                operacoes, conf = extractDayDetalhe.extrair_nota(doc, broker, paginas_por_linha[idx])
+                if isinstance(detalhes[idx], Exception):
+                    raise detalhes[idx]
+                operacoes, conf = detalhes[idx]
                 if dry_run:
                     logging.info(f"🧪 [DRY-RUN] {contexto}: {conf['operacoes']} operação(ões) lidas; "
                                  f"soma {conf['soma_operacoes']} = valor dos negócios {conf['valor_negocios']}. Nada gravado.")
@@ -192,11 +211,12 @@ def process_day_pdf(pdf_path: str, external_session: Session = None, dry_run: bo
         return ok
 
     try:
-        if external_session:
-            return persistir(external_session)
-        else:
-            with get_session() as session:
-                return persistir(session)
+        with regiao_critica(engine):
+            if external_session:
+                return persistir(external_session)
+            else:
+                with get_session() as session:
+                    return persistir(session)
     finally:
         doc.close()
 
