@@ -890,11 +890,24 @@ def process_swing_pdf(pdf_path: str, external_session: Session = None, dry_run: 
 
         vol_total_nota = sum(t['totalValor'] for t in aggregated_trades.values())
 
-        for key, trade in aggregated_trades.items():
+        # Nomes brutos diferentes que viram o mesmo ticker (lote padrão e
+        # fracionário: "PETR3 ON" e "PETR3F ON") somam numa operação só; sem
+        # isso a 2ª batia na UniqueConstraint e não era gravada.
+        por_ticker: dict[tuple, dict] = {}
+        for trade in aggregated_trades.values():
+            fantasia = mapped_names.get(trade['nomeAtivo'], {}).get('nomeFantasia', trade['nomeAtivo'])
+            chave = (trade['nrNota'], fantasia, trade['operacaoTipo'], trade['isDayTrade'])
+            if chave not in por_ticker:
+                por_ticker[chave] = {**trade, 'nomeFantasia': fantasia}
+            else:
+                por_ticker[chave]['quantidade'] += trade['quantidade']
+                por_ticker[chave]['totalValor'] += trade['totalValor']
+
+        for key, trade in por_ticker.items():
             qnt = trade['quantidade']
             total_val = trade['totalValor']
             preco_ajuste = Decimal(round(total_val / qnt, 2)) if qnt > 0 else Decimal('0.00')
-            nome_fantasia = mapped_names.get(trade['nomeAtivo'], {}).get('nomeFantasia', trade['nomeAtivo'])
+            nome_fantasia = trade['nomeFantasia']
 
             if vol_total_nota > Decimal('0'):
                 taxa_rateada = (trade['totalValor'] / vol_total_nota) * summary_data['taxas']

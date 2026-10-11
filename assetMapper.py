@@ -8,7 +8,7 @@ from sqlmodel import Session, select
 from schemas import registroNomeAtivos
 
 YAML_PATH = "missing_assets.yaml"
-TICKER_REGEX = re.compile(r'\b[A-Z0-9]{4}\d{1,2}\b')
+TICKER_REGEX = re.compile(r'\b[A-Z0-9]{4}\d{1,2}F?\b')
 yaml_lock = threading.Lock()
 
 
@@ -28,13 +28,29 @@ def classificar_tipo_ativo(ticker: str) -> str:
         return "BDR"
     return "ACAO"
 
+# Mercado fracionário: a B3 negocia o lote fracionário com o ticker + "F"
+# (PETR3F = PETR3). Só se tira o F quando o resto é um ticker de ação/unit/BDR
+# válido: 4 caracteres + final 3-8, 11 ou 32-39. Qualquer outra coisa que
+# termine em F fica como está.
+FRACIONARIO_REGEX = re.compile(r'^([A-Z][A-Z0-9]{3}(?:[3-8]|11|3[2-9]))F$')
+
+
+def normalizar_ticker(ticker: str) -> str:
+    """PETR3F -> PETR3, BOVA11F -> BOVA11; o resto volta igual (só strip/upper)."""
+    if ticker is None:
+        return ticker
+    t = str(ticker).strip().upper()
+    m = FRACIONARIO_REGEX.match(t)
+    return m.group(1) if m else t
+
+
 def normalize_name(s: str) -> str:
     return re.sub(r'[^A-Z0-9]', '', str(s or "").upper())
 
 def extract_ticker_from_name(nome_ativo: str) -> str | None:
     match = TICKER_REGEX.search(nome_ativo.upper())
     if match:
-        return match.group(0)
+        return normalizar_ticker(match.group(0))
     return None
 
 def resolve_asset_names(session: Session, asset_names: list[str]) -> dict[str, str] | None:
@@ -53,7 +69,7 @@ def resolve_asset_names(session: Session, asset_names: list[str]) -> dict[str, s
                 new_entries = False
                 for nome_ativo, ticker in data.items():
                     if ticker and str(ticker).strip():
-                        ticker_clean = str(ticker).strip().upper()
+                        ticker_clean = normalizar_ticker(ticker)
                         existing = session.exec(
                             select(registroNomeAtivos).where(registroNomeAtivos.nomeAtivo == nome_ativo)
                         ).first()
@@ -75,7 +91,8 @@ def resolve_asset_names(session: Session, asset_names: list[str]) -> dict[str, s
     # 2. Buscar no banco todos os nomes requisitados
     stmt = select(registroNomeAtivos).where(registroNomeAtivos.nomeAtivo.in_(asset_names))
     db_entries = session.exec(stmt).all()
-    mapped = {entry.nomeAtivo: entry.nomeFantasia for entry in db_entries}
+    # normalizar_ticker também vale para linhas antigas do banco (PETR3F -> PETR3)
+    mapped = {entry.nomeAtivo: normalizar_ticker(entry.nomeFantasia) for entry in db_entries}
 
     missing = [name for name in asset_names if name not in mapped]
 
@@ -91,11 +108,12 @@ def resolve_asset_names(session: Session, asset_names: list[str]) -> dict[str, s
                 db_norm = normalize_name(entry.nomeAtivo)
                 if db_norm and len(db_norm) >= 4:
                     if db_norm == name_norm or db_norm in name_norm or name_norm in db_norm:
-                        mapped[name] = entry.nomeFantasia
+                        fantasia = normalizar_ticker(entry.nomeFantasia)
+                        mapped[name] = fantasia
                         reg = registroNomeAtivos(
                             nomeAtivo=name,
-                            nomeFantasia=entry.nomeFantasia,
-                            tipoAtivo=classificar_tipo_ativo(entry.nomeFantasia),
+                            nomeFantasia=fantasia,
+                            tipoAtivo=classificar_tipo_ativo(fantasia),
                         )
                         session.add(reg)
                         new_matches = True
@@ -138,7 +156,7 @@ def resolve_asset_names(session: Session, asset_names: list[str]) -> dict[str, s
             # Verifica novamente no banco para o caso de outra thread já ter cadastrado
             stmt = select(registroNomeAtivos).where(registroNomeAtivos.nomeAtivo.in_(missing))
             db_entries = session.exec(stmt).all()
-            newly_mapped = {entry.nomeAtivo: entry.nomeFantasia for entry in db_entries}
+            newly_mapped = {entry.nomeAtivo: normalizar_ticker(entry.nomeFantasia) for entry in db_entries}
             
             missing = [m for m in missing if m not in newly_mapped]
             mapped.update(newly_mapped)
@@ -181,7 +199,7 @@ def resolve_asset_names(session: Session, asset_names: list[str]) -> dict[str, s
                     for m in missing:
                         ticker = yaml_content.get(m)
                         if ticker and str(ticker).strip():
-                            ticker_clean = str(ticker).strip().upper()
+                            ticker_clean = normalizar_ticker(ticker)
                             mapped[m] = ticker_clean
                             reg = registroNomeAtivos(
                                 nomeAtivo=m,
