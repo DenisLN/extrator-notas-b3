@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import fitz as pymu
 import xxhash
 import logging
@@ -20,9 +21,9 @@ from areaCodes import (
     areaDict_xp_day, areaDict_btg_day, brokerName_swing, brokerName_day
 )
 from cleanupFunctions import cleanup_dict
-from extractSwing import process_swing_pdf, engine
-from extractDay import process_day_pdf
-from schemas import operacoesSwingtrade, notasDaytrade, registroNotasSwing
+# extractSwing/extractDay (e o banco) só são importados no subprocesso que
+# processa cada arquivo (ver processar_um_arquivo): o processo principal só
+# trava, lista a entrada, faz o snapshot e junta os resultados.
 
 # Códigos de saída (o coletor de e-mails grava o código no journal).
 SAIDA_OK = 0        # tudo processado (ou nada a processar)
@@ -36,6 +37,13 @@ DESCRICAO_SAIDA = {
     SAIDA_OCUPADO: "outra execução em andamento",
 }
 YAML_PENDENTES = "missing_assets.yaml"   # o mesmo de assetMapper.YAML_PATH
+
+# Cada PDF da entrada é processado num subprocesso (este mesmo script com
+# --um-arquivo): uma nota que quebre o interpretador, trave ou vaze memória
+# não derruba o lote. O subprocesso termina a saída com uma linha
+# MARCA_RESULTADO + JSON, que o processo principal lê para montar o resumo.
+MARCA_RESULTADO = "@@RESULTADO_ARQUIVO@@ "
+TIMEOUT_POR_ARQUIVO = int(os.getenv("NOTAS_TIMEOUT_POR_ARQUIVO", "1800"))  # segundos
 
 # URL do banco de dados configurada via .env
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -161,6 +169,28 @@ class Resumo:
         self.ativos_negociados = set()
         self.erro_geral = None    # falha que impediu o lote (pg_dump etc.)
 
+    def para_json(self, all_success: bool) -> str:
+        return json.dumps({
+            "all_success": all_success,
+            "gravadas": self.gravadas,
+            "ja_registradas": self.ja_registradas,
+            "falhas": self.falhas,
+            "pausadas": self.pausadas,
+            "falhas_detalhe": self.falhas_detalhe,
+            "com_erros": self.com_erros,
+            "ativos_negociados": sorted(self.ativos_negociados),
+        }, ensure_ascii=False)
+
+    def juntar(self, dados: dict):
+        for tipo in ("SWING", "DAY"):
+            self.gravadas[tipo] += dados["gravadas"].get(tipo, 0)
+            self.ja_registradas[tipo] += dados["ja_registradas"].get(tipo, 0)
+        self.falhas += [tuple(x) for x in dados["falhas"]]
+        self.pausadas += [tuple(x) for x in dados["pausadas"]]
+        self.falhas_detalhe += dados["falhas_detalhe"]
+        self.com_erros += [tuple(x) for x in dados["com_erros"]]
+        self.ativos_negociados |= set(dados["ativos_negociados"])
+
     def codigo_saida(self) -> int:
         if self.erro_geral or self.falhas or self.falhas_detalhe or self.com_erros:
             return SAIDA_FALHA
@@ -221,6 +251,8 @@ def nota_ja_registrada(trade_type: str, n_cliente, data_obj, nr_nota) -> bool:
     o resumo distinguir "já existente" de "gravada agora"."""
     if not (n_cliente and data_obj and nr_nota):
         return False
+    from extractSwing import engine
+    from schemas import notasDaytrade, registroNotasSwing
     tabela = notasDaytrade if trade_type == "DAY" else registroNotasSwing
     with Session(engine) as session:
         return session.exec(select(tabela.id).where(
@@ -232,8 +264,6 @@ def nota_ja_registrada(trade_type: str, n_cliente, data_obj, nr_nota) -> bool:
 
 def process_batch(dry_run: bool = False, resumo: "Resumo | None" = None) -> Resumo:
     resumo = resumo if resumo is not None else Resumo()
-    ultimo_aviso = _UltimoAviso()
-    logging.getLogger().addHandler(ultimo_aviso)
 
     pdf_files = list(INPUT_DIR.rglob("*.pdf"))
     logging.info(f"🔍 {len(pdf_files)} arquivo(s) PDF em '{INPUT_DIR}'.")
@@ -259,12 +289,7 @@ def process_batch(dry_run: bool = False, resumo: "Resumo | None" = None) -> Resu
         for n_arq, pdf_path in enumerate(pdf_files, start=1):
             resumo.arquivos += 1
             logging.info(f"── Arquivo {n_arq}/{len(pdf_files)}: {pdf_path.name}")
-            try:
-                all_success = process_file(pdf_path, base_output_dir, dry_run, resumo, ultimo_aviso)
-            except Exception as e:
-                logging.exception(f"❌ {pdf_path.name}: erro inesperado ao processar o arquivo: {type(e).__name__}: {e}")
-                resumo.falhas.append((pdf_path.name, f"erro inesperado: {type(e).__name__}: {e}"))
-                all_success = False
+            all_success = rodar_subprocesso(pdf_path, base_output_dir, dry_run, resumo)
 
             if dry_run:
                 logging.info(f"🧪 [DRY-RUN] O arquivo original NÃO foi alterado/removido: {pdf_path}")
@@ -283,9 +308,86 @@ def process_batch(dry_run: bool = False, resumo: "Resumo | None" = None) -> Resu
     return resumo
 
 
+def rodar_subprocesso(pdf_path: Path, base_output_dir: Path, dry_run: bool, resumo: Resumo) -> bool:
+    """Processa um PDF num subprocesso (este script com --um-arquivo), repassa
+    a saída dele para o log e junta o resultado ao resumo. Devolve True se
+    todas as notas do arquivo foram gravadas (ou já existiam)."""
+    cmd = [sys.executable, str(Path(__file__).resolve()), "--um-arquivo", str(pdf_path),
+           "--saida", str(base_output_dir)]
+    if dry_run:
+        cmd.append("--dry-run")
+    if logging.getLogger().isEnabledFor(logging.DEBUG):
+        cmd.append("--verbose")
+    env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
+    try:
+        r = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=TIMEOUT_POR_ARQUIVO, env=env)
+    except subprocess.TimeoutExpired as e:
+        _repassar(e.stdout, e.stderr)
+        logging.error(f"❌ {pdf_path.name}: o subprocesso passou de {TIMEOUT_POR_ARQUIVO} s e foi encerrado.")
+        resumo.falhas.append((pdf_path.name, f"subprocesso passou de {TIMEOUT_POR_ARQUIVO} s (encerrado)"))
+        return False
+    except Exception as e:
+        logging.exception(f"❌ {pdf_path.name}: não consegui iniciar o subprocesso: {e}")
+        resumo.falhas.append((pdf_path.name, f"não consegui iniciar o subprocesso: {e}"))
+        return False
+
+    dados = _repassar(r.stdout, r.stderr)
+    if dados is None:
+        ultima = next((l for l in reversed((r.stderr or "").splitlines()) if l.strip()), "")
+        desc = f"subprocesso terminou com código {r.returncode} sem resultado" + (f" ({ultima})" if ultima else "")
+        logging.error(f"❌ {pdf_path.name}: {desc}")
+        resumo.falhas.append((pdf_path.name, desc))
+        return False
+    resumo.juntar(dados)
+    return bool(dados["all_success"])
+
+
+def _repassar(stdout, stderr):
+    """Copia a saída do subprocesso para a do processo principal (o log de
+    cada nota continua aparecendo, em ordem) e devolve o JSON do resultado."""
+    if isinstance(stdout, bytes):
+        stdout = stdout.decode("utf-8", "replace")
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", "replace")
+    dados = None
+    for linha in (stdout or "").splitlines():
+        if linha.startswith(MARCA_RESULTADO):
+            try:
+                dados = json.loads(linha[len(MARCA_RESULTADO):])
+            except ValueError as e:
+                logging.error(f"Resultado do subprocesso ilegível: {e}")
+            continue
+        print(linha, flush=True)
+    for linha in (stderr or "").splitlines():
+        if linha.strip():
+            print(f"[stderr] {linha}", flush=True)
+    return dados
+
+
+def processar_um_arquivo(pdf_path: Path, base_output_dir: Path, dry_run: bool) -> int:
+    """Modo subprocesso (--um-arquivo): processa um PDF e imprime o resultado
+    numa linha MARCA_RESULTADO + JSON. Não pega a trava, não faz snapshot e
+    não apaga o original (tudo isso é do processo principal)."""
+    resumo = Resumo()
+    ultimo_aviso = _UltimoAviso()
+    logging.getLogger().addHandler(ultimo_aviso)
+    try:
+        all_success = process_file(pdf_path, base_output_dir, dry_run, resumo, ultimo_aviso)
+    except Exception as e:
+        logging.exception(f"❌ {pdf_path.name}: erro inesperado ao processar o arquivo: {type(e).__name__}: {e}")
+        resumo.falhas.append((pdf_path.name, f"erro inesperado: {type(e).__name__}: {e}"))
+        all_success = False
+    sys.stdout.flush()
+    print(MARCA_RESULTADO + resumo.para_json(all_success), flush=True)
+    return resumo.codigo_saida()
+
+
 def process_file(pdf_path: Path, base_output_dir: Path, dry_run: bool, resumo: Resumo, ultimo_aviso: _UltimoAviso) -> bool:
     """Isola cada nota do PDF e processa. Devolve True se todas as notas do
     arquivo foram gravadas (ou já existiam) -- só então o original é apagado."""
+    from extractSwing import process_swing_pdf
+    from extractDay import process_day_pdf
     try:
         doc_src = pymu.open(pdf_path)
     except Exception as e:
@@ -434,6 +536,8 @@ def process_file(pdf_path: Path, base_output_dir: Path, dry_run: bool, resumo: R
 def recalcular_swing_da_nota(n_cliente, data_obj, nr_nota, resumo: Resumo):
     """Recupera as operações gravadas da nota (ativos e CPF) e recalcula o
     swing do CPF (computeSwing.recalcular_swing). Exceções sobem."""
+    from extractSwing import engine
+    from schemas import operacoesSwingtrade
     with Session(engine) as session:
         n_nota_int = int(nr_nota) if nr_nota else 0
         data_param = data_obj.date() if (hasattr(data_obj, 'date') and callable(getattr(data_obj, 'date'))) else data_obj
@@ -498,6 +602,10 @@ def restore_database(backup_name):
 def configurar_log(verbose: bool = False):
     """Tudo no stdout (o coletor de e-mails junta stdout+stderr nessa ordem e
     guarda as últimas 30 linhas: com o log no stdout, o resumo fica no fim)."""
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     raiz = logging.getLogger()
     for h in list(raiz.handlers):
         raiz.removeHandler(h)
@@ -544,9 +652,15 @@ def main(argv=None) -> int:
     parser.add_argument("--restore", type=str, metavar="NOME", help="Restaura um backup específico da pasta backups/ e sai.")
     parser.add_argument("--dry-run", action="store_true", help="Executa o fluxo em modo simulação sem alterar o banco de dados nem mover/deletar arquivos.")
     parser.add_argument("-v", "--verbose", action="store_true", help="Log em nível DEBUG.")
+    # Uso interno: o processo principal chama este script uma vez por PDF.
+    parser.add_argument("--um-arquivo", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--saida", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
     configurar_log(args.verbose)
+
+    if args.um_arquivo:
+        return processar_um_arquivo(args.um_arquivo, args.saida or OUTPUT_DIR, args.dry_run)
 
     if args.restore_last:
         return SAIDA_OK if restore_database('last') else SAIDA_FALHA

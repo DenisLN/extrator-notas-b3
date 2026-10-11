@@ -173,8 +173,16 @@ de modo que as 30 últimas linhas guardadas pelo coletor contenham o resumo.
 | `2` | Nenhuma falha, mas alguma nota de swing ficou **pausada** esperando `missing_assets.yaml` (ativo sem ticker). Preencha o arquivo e rode de novo. Sem terminal (coletor/systemd) a nota é pausada em vez de esperar o ENTER. |
 | `3` | Outra execução já está rodando (trava ocupada); nada foi feito. |
 
-Uma nota ruim não derruba o lote: o erro vai para o log com o arquivo, a nota
-e a etapa, e as outras notas seguem. "Nota já registrada" (reenvio da
+Uma nota ruim não derruba o lote: **cada PDF da entrada é processado num
+subprocesso** (o próprio `process_notas.py`, em modo interno `--um-arquivo`).
+O processo principal só pega a trava, lista a entrada, faz o snapshot
+(`pg_dump`), chama um subprocesso por PDF, repassa a saída dele para o log e
+lê o resultado para o resumo; quem apaga o original é o processo principal,
+só quando o subprocesso diz que todas as notas do arquivo deram certo. Se o
+subprocesso quebrar, travar (limite de `NOTAS_TIMEOUT_POR_ARQUIVO` segundos,
+padrão 1800) ou morrer sem resultado, aquele PDF conta como falha, fica na
+entrada e os outros seguem. O erro vai para o log com o arquivo, a nota e a
+etapa. "Nota já registrada" (reenvio da
 corretora, reprocessamento) não é falha: nada é duplicado e o original é
 apagado.
 
