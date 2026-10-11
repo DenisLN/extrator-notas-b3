@@ -8,6 +8,7 @@ import subprocess
 import argparse
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
@@ -44,6 +45,12 @@ YAML_PENDENTES = "missing_assets.yaml"   # o mesmo de assetMapper.YAML_PATH
 # MARCA_RESULTADO + JSON, que o processo principal lê para montar o resumo.
 MARCA_RESULTADO = "@@RESULTADO_ARQUIVO@@ "
 TIMEOUT_POR_ARQUIVO = int(os.getenv("NOTAS_TIMEOUT_POR_ARQUIVO", "1800"))  # segundos
+
+# Quantos subprocessos ao mesmo tempo: um por thread do processador (ou
+# NOTAS_PROCESSOS), nunca mais que o número de PDFs. A leitura dos PDFs é que
+# roda em paralelo; as gravações no banco passam uma de cada vez pela região
+# crítica de travaBanco.py.
+PROCESSOS = max(1, int(os.getenv("NOTAS_PROCESSOS") or os.cpu_count() or 1))
 
 # URL do banco de dados configurada via .env
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -247,8 +254,9 @@ def ativos_pendentes() -> list[str]:
 
 
 def nota_ja_registrada(trade_type: str, n_cliente, data_obj, nr_nota) -> bool:
-    """A nota (conta, data, número) já está no banco? Só leitura; serve para
-    o resumo distinguir "já existente" de "gravada agora"."""
+    """A nota (conta, data, número) já está no banco? Só leitura. Serve ao
+    resumo no --dry-run, que não grava; na gravação real quem diz se a nota
+    já existia é o extrator, de dentro da região crítica."""
     if not (n_cliente and data_obj and nr_nota):
         return False
     from extractSwing import engine
@@ -280,38 +288,69 @@ def process_batch(dry_run: bool = False, resumo: "Resumo | None" = None) -> Resu
                                  "Resolva o erro do pg_dump (mensagem acima) e rode de novo.")
             return resumo
 
+    if not preparar_banco(resumo):
+        return resumo
+
     temp_base_dir = Path("temp")
     temp_base_dir.mkdir(exist_ok=True)
+
+    n_proc = min(PROCESSOS, len(pdf_files))
+    logging.info(f"⚙️  {n_proc} subprocesso(s) em paralelo ({os.cpu_count()} thread(s) no processador).")
 
     with tempfile.TemporaryDirectory(dir=temp_base_dir) as temp_dir:
         base_output_dir = Path(temp_dir) if dry_run else OUTPUT_DIR
 
-        for n_arq, pdf_path in enumerate(pdf_files, start=1):
-            resumo.arquivos += 1
-            logging.info(f"── Arquivo {n_arq}/{len(pdf_files)}: {pdf_path.name}")
-            all_success = rodar_subprocesso(pdf_path, base_output_dir, dry_run, resumo)
+        # As threads só esperam os subprocessos; o resultado de cada um é
+        # tratado aqui, na thread principal, à medida que terminam (o log de
+        # um arquivo sai inteiro, sem se misturar com o de outro).
+        with ThreadPoolExecutor(max_workers=n_proc) as pool:
+            futuros = {pool.submit(executar_subprocesso, pdf_path, base_output_dir, dry_run): pdf_path
+                       for pdf_path in pdf_files}
+            for n_arq, futuro in enumerate(as_completed(futuros), start=1):
+                pdf_path = futuros[futuro]
+                resumo.arquivos += 1
+                logging.info(f"── Arquivo {n_arq}/{len(pdf_files)}: {pdf_path.name}")
+                all_success = juntar_subprocesso(pdf_path, futuro.result(), resumo)
 
-            if dry_run:
-                logging.info(f"🧪 [DRY-RUN] O arquivo original NÃO foi alterado/removido: {pdf_path}")
-            elif all_success:
-                try:
-                    os.remove(pdf_path)
-                    resumo.originais_apagados += 1
-                    logging.info(f"✅ Arquivo original apagado: {pdf_path}")
-                except Exception as e:
-                    logging.error(f"❌ Erro ao apagar arquivo original {pdf_path}: {e}")
-                    resumo.falhas.append((pdf_path.name, f"processado, mas o original não pôde ser apagado: {e}"))
-            else:
-                resumo.originais_mantidos.append(pdf_path.name)
-                logging.warning(f"⚠️  {pdf_path.name}: mantido na entrada (alguma nota falhou ou foi pausada); será tentado de novo na próxima execução.")
+                if dry_run:
+                    logging.info(f"🧪 [DRY-RUN] O arquivo original NÃO foi alterado/removido: {pdf_path}")
+                elif all_success:
+                    try:
+                        os.remove(pdf_path)
+                        resumo.originais_apagados += 1
+                        logging.info(f"✅ Arquivo original apagado: {pdf_path}")
+                    except Exception as e:
+                        logging.error(f"❌ Erro ao apagar arquivo original {pdf_path}: {e}")
+                        resumo.falhas.append((pdf_path.name, f"processado, mas o original não pôde ser apagado: {e}"))
+                else:
+                    resumo.originais_mantidos.append(pdf_path.name)
+                    logging.warning(f"⚠️  {pdf_path.name}: mantido na entrada (alguma nota falhou ou foi pausada); será tentado de novo na próxima execução.")
 
     return resumo
 
 
-def rodar_subprocesso(pdf_path: Path, base_output_dir: Path, dry_run: bool, resumo: Resumo) -> bool:
-    """Processa um PDF num subprocesso (este script com --um-arquivo), repassa
-    a saída dele para o log e junta o resultado ao resumo. Devolve True se
-    todas as notas do arquivo foram gravadas (ou já existiam)."""
+def preparar_banco(resumo: Resumo) -> bool:
+    """Cria as tabelas que faltarem antes de abrir os subprocessos (cada um
+    chama create_all ao importar os extratores; vários criando a mesma
+    tabela nova ao mesmo tempo colidem) e confere que o banco responde."""
+    try:
+        from db_connection import engine
+        import schemas  # noqa: F401  (registra os modelos)
+        from sqlmodel import SQLModel
+        from travaBanco import regiao_critica
+        with regiao_critica(engine):
+            SQLModel.metadata.create_all(engine)
+        return True
+    except Exception as e:
+        logging.exception(f"❌ Não consegui preparar o banco: {type(e).__name__}: {e}")
+        resumo.erro_geral = f"banco indisponível: {type(e).__name__}: {e}"
+        return False
+
+
+def executar_subprocesso(pdf_path: Path, base_output_dir: Path, dry_run: bool):
+    """Roda numa thread do pool: processa um PDF num subprocesso (este script
+    com --um-arquivo) e devolve o CompletedProcess, ou a exceção
+    (TimeoutExpired etc.), para a thread principal tratar."""
     cmd = [sys.executable, str(Path(__file__).resolve()), "--um-arquivo", str(pdf_path),
            "--saida", str(base_output_dir)]
     if dry_run:
@@ -320,16 +359,24 @@ def rodar_subprocesso(pdf_path: Path, base_output_dir: Path, dry_run: bool, resu
         cmd.append("--verbose")
     env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
     try:
-        r = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", timeout=TIMEOUT_POR_ARQUIVO, env=env)
-    except subprocess.TimeoutExpired as e:
-        _repassar(e.stdout, e.stderr)
+        return subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=TIMEOUT_POR_ARQUIVO, env=env)
+    except Exception as e:
+        return e
+
+
+def juntar_subprocesso(pdf_path: Path, r, resumo: Resumo) -> bool:
+    """Repassa a saída do subprocesso para o log e junta o resultado ao
+    resumo. Devolve True se todas as notas do arquivo foram gravadas (ou já
+    existiam)."""
+    if isinstance(r, subprocess.TimeoutExpired):
+        _repassar(r.stdout, r.stderr)
         logging.error(f"❌ {pdf_path.name}: o subprocesso passou de {TIMEOUT_POR_ARQUIVO} s e foi encerrado.")
         resumo.falhas.append((pdf_path.name, f"subprocesso passou de {TIMEOUT_POR_ARQUIVO} s (encerrado)"))
         return False
-    except Exception as e:
-        logging.exception(f"❌ {pdf_path.name}: não consegui iniciar o subprocesso: {e}")
-        resumo.falhas.append((pdf_path.name, f"não consegui iniciar o subprocesso: {e}"))
+    if isinstance(r, Exception):
+        logging.error(f"❌ {pdf_path.name}: não consegui iniciar o subprocesso: {type(r).__name__}: {r}")
+        resumo.falhas.append((pdf_path.name, f"não consegui iniciar o subprocesso: {r}"))
         return False
 
     dados = _repassar(r.stdout, r.stderr)
@@ -462,28 +509,21 @@ def process_file(pdf_path: Path, base_output_dir: Path, dry_run: bool, resumo: R
                 logging.info(f"{rotulo}: isolada como '{isolated_filename}'.")
 
                 if not isolated_filepath.exists():
-                    new_doc = pymu.open()
-                    new_doc.insert_pdf(doc_src, from_page=start_page_idx, to_page=end_page_idx)
-                    new_doc.save(str(isolated_filepath))
-                    new_doc.close()
+                    if not salvar_nota_isolada(doc_src, start_page_idx, end_page_idx, isolated_filepath):
+                        logging.info(f"⏩ Nota isolada ao mesmo tempo por outro processo: '{isolated_filepath.name}' (vale a dele)")
                 else:
                     logging.info(f"⏩ Nota já existe no disco: '{isolated_filepath.name}'")
 
                 if dry_run:
                     logging.info(f"🧪 [DRY-RUN] Isolação de nota simulada para: {isolated_filename}")
 
-                try:
-                    ja_registrada = nota_ja_registrada(trade_type, n_cliente, data_obj, nr_nota)
-                except Exception as e:
-                    logging.warning(f"{rotulo}: não consegui conferir se a nota já está no banco: {e}")
-                    ja_registrada = False
-
                 ultimo_aviso.reiniciar()
                 success = False
                 motivo = None
+                gravacao = {}   # o extrator põe 'ja_registrada', decidido dentro da região crítica
                 try:
                     if trade_type == "SWING":
-                        success = process_swing_pdf(str(isolated_filepath), dry_run=dry_run)
+                        success = process_swing_pdf(str(isolated_filepath), dry_run=dry_run, resultado=gravacao)
                         if success and not dry_run:
                             try:
                                 recalcular_swing_da_nota(n_cliente, data_obj, nr_nota, resumo)
@@ -493,7 +533,7 @@ def process_file(pdf_path: Path, base_output_dir: Path, dry_run: bool, resumo: R
                                 motivo = f"nota gravada, mas o recálculo do swing falhou: {e} (o original fica para refazer o recálculo)"
                     else:
                         success = process_day_pdf(str(isolated_filepath), dry_run=dry_run,
-                                                  falhas_detalhe=resumo.falhas_detalhe)
+                                                  falhas_detalhe=resumo.falhas_detalhe, resultado=gravacao)
                 except Exception as e:
                     # Uma nota com erro não derruba as outras do mesmo arquivo nem o lote.
                     logging.exception(f"❌ {rotulo}: erro inesperado ao processar a nota: {type(e).__name__}: {e}")
@@ -501,6 +541,13 @@ def process_file(pdf_path: Path, base_output_dir: Path, dry_run: bool, resumo: R
                     motivo = f"erro inesperado: {type(e).__name__}: {e}"
 
                 if success:
+                    ja_registrada = gravacao.get("ja_registrada")
+                    if ja_registrada is None:   # --dry-run: o extrator não chega a gravar
+                        try:
+                            ja_registrada = nota_ja_registrada(trade_type, n_cliente, data_obj, nr_nota)
+                        except Exception as e:
+                            logging.warning(f"{rotulo}: não consegui conferir se a nota já está no banco: {e}")
+                            ja_registrada = False
                     erros = [m for m in ultimo_aviso.erros if "detalhe por operação" not in m]
                     if erros:
                         resumo.com_erros.append((pdf_path.name, f"nota nº {nr_nota} ({trade_type}): {erros[-1]}"
@@ -533,10 +580,47 @@ def process_file(pdf_path: Path, base_output_dir: Path, dry_run: bool, resumo: R
         doc_src.close()
 
 
+def salvar_nota_isolada(doc_src, inicio: int, fim: int, destino: Path) -> bool:
+    """Grava as páginas da nota em destino sem nunca deixar um arquivo pela
+    metade: salva num temporário ao lado e só então o liga ao nome final.
+    Se outro processo isolou a mesma nota no meio-tempo (o mesmo PDF duas
+    vezes na entrada), vale o arquivo dele e devolve False."""
+    tmp = destino.with_name(f".{destino.name}.{os.getpid()}.tmp")
+    new_doc = pymu.open()
+    try:
+        new_doc.insert_pdf(doc_src, from_page=inicio, to_page=fim)
+        new_doc.save(str(tmp))
+    finally:
+        new_doc.close()
+    try:
+        try:
+            os.link(tmp, destino)       # falha se o destino já existe
+        except FileExistsError:
+            return False
+        except OSError:
+            # Sistema de arquivos sem link (montagem SMB etc.): o rename também
+            # é atômico; no pior caso troca um arquivo completo por outro igual.
+            if destino.exists():
+                return False
+            os.replace(tmp, destino)
+        return True
+    finally:
+        if tmp.exists():
+            os.remove(tmp)
+
+
 def recalcular_swing_da_nota(n_cliente, data_obj, nr_nota, resumo: Resumo):
     """Recupera as operações gravadas da nota (ativos e CPF) e recalcula o
-    swing do CPF (computeSwing.recalcular_swing). Exceções sobem."""
+    swing do CPF (computeSwing.recalcular_swing), dentro da região crítica:
+    o recálculo apaga e regrava resultadoMensalSwing/posicaoSwing do CPF e
+    tem de ver todas as operações já confirmadas. Exceções sobem."""
     from extractSwing import engine
+    from travaBanco import regiao_critica
+    with regiao_critica(engine):
+        _recalcular_swing_da_nota(engine, n_cliente, data_obj, nr_nota, resumo)
+
+
+def _recalcular_swing_da_nota(engine, n_cliente, data_obj, nr_nota, resumo: Resumo):
     from schemas import operacoesSwingtrade
     with Session(engine) as session:
         n_nota_int = int(nr_nota) if nr_nota else 0

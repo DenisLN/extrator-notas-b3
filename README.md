@@ -176,7 +176,8 @@ de modo que as 30 últimas linhas guardadas pelo coletor contenham o resumo.
 Uma nota ruim não derruba o lote: **cada PDF da entrada é processado num
 subprocesso** (o próprio `process_notas.py`, em modo interno `--um-arquivo`).
 O processo principal só pega a trava, lista a entrada, faz o snapshot
-(`pg_dump`), chama um subprocesso por PDF, repassa a saída dele para o log e
+(`pg_dump`), chama os subprocessos (vários ao mesmo tempo, ver
+"Paralelismo" abaixo), repassa a saída deles para o log e
 lê o resultado para o resumo; quem apaga o original é o processo principal,
 só quando o subprocesso diz que todas as notas do arquivo deram certo. Se o
 subprocesso quebrar, travar (limite de `NOTAS_TIMEOUT_POR_ARQUIVO` segundos,
@@ -194,6 +195,36 @@ execução ao mesmo tempo (ex.: à mão enquanto o coletor roda) sai na hora com
 mensagem "Outra execução do process_notas.py já está em andamento" e o código
 `3`. O arquivo `.processando` fica no diretório de propósito; não apague.
 `--restore`/`--restore-last` não pegam a trava.
+
+### Paralelismo e gravação no banco
+
+Os PDFs são lidos **em paralelo**: um subprocesso por thread do processador
+(`os.cpu_count()`; troque com `NOTAS_PROCESSOS`), nunca mais que o número de
+PDFs. A saída de cada PDF aparece inteira no log, na ordem em que terminam.
+
+As **gravações não** são paralelas. Tudo o que lê e grava no banco para decidir
+o destino de uma nota (a nota já existe? o ativo já tem ticker? o
+`missing_assets.yaml`; a gravação da nota e das operações; o recálculo do
+swing do CPF) roda dentro de uma **região crítica**: uma trava consultiva do
+Postgres (`pg_advisory_lock`), única para o projeto, em
+[`travaBanco.py`](travaBanco.py). Ler o PDF é o que demora; gravar leva
+milissegundos, então a fila é curta. Assim a mesma nota em dois PDFs lidos ao
+mesmo tempo é gravada uma vez só (o outro PDF vê "já registrada"), e dois
+recálculos do mesmo CPF não se intercalam.
+
+- A trava é do banco, não do processo: vale também entre o coletor no
+  servidor e uma execução à mão em outra máquina contra o mesmo banco.
+- Um subprocesso morto (timeout, quebra) solta a trava, porque o Postgres a
+  libera quando a conexão cai.
+- Se a trava não vier em `NOTAS_ESPERA_TRAVA_BANCO` segundos (padrão 900), a
+  nota falha com essa mensagem e o PDF fica na entrada.
+- A nota de swing e as operações dela são gravadas numa transação só: ou
+  entram juntas, ou nada entra.
+- As tabelas são criadas (`create_all`) pelo processo principal antes de abrir
+  os subprocessos.
+- A nota é isolada no `OUTPUT_DIR` num temporário e só depois ganha o nome
+  final, então nunca fica um PDF pela metade, nem quando dois subprocessos
+  isolam a mesma nota.
 
 ### Day trade por operação (só registro)
 
